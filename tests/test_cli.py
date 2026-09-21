@@ -95,6 +95,12 @@ class CliRig:
             pid = None
         if pid is not None:
             os.kill(pid, signal.SIGKILL)
+        # A bridge started from this process is its child: reap it, or it lingers as a
+        # zombie that still answers `kill -0`. One started by a CLI subprocess belongs to init.
+        for proc in cli._spawned:
+            proc.wait(timeout=5)
+        cli._spawned.clear()
+        if pid is not None:
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 try:

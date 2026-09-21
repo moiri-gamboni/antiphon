@@ -12,6 +12,7 @@ import pytest
 from antiphon import ipc
 from antiphon.bridge import AlreadyRunning, Bridge
 from antiphon.callers import Caller
+from fake_claude import FakeClaude
 from fake_daemon import FakeDaemon, load_fixture
 
 THREAD_START = load_fixture("thread-start.jsonl")
@@ -714,3 +715,111 @@ def test_ipc_requests_reach_the_ops_with_the_caller_classified(short_tmp):
     result, spawner = run(body())
     assert result["name"] == "h"
     assert spawner == "human"
+
+
+# --- peer children ---------------------------------------------------------------
+
+
+def test_start_without_a_live_claude_session_leaves_the_thread_unregistered_and_says_so(short_tmp, caplog):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            with caplog.at_level(logging.INFO, logger="antiphon.bridge"):
+                await rig.start_thread()
+            return rig.bridge.state.threads[THREAD_ID].child_pid
+
+    assert run(body()) is None
+    assert "waiting for a Claude Code session to copy the peer record shape from" in caplog.text
+
+
+def test_a_claude_session_appearing_makes_the_next_reconcile_register_the_peer(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.bridge.reconcile()
+                thread = rig.bridge.state.threads[THREAD_ID]
+                record_path = rig.sessions_dir / f"{thread.child_pid}.json"
+                record = json.loads(record_path.read_text())
+                await rig.bridge.dispatch("name", {"target": "helper", "new": "planner"}, HUMAN)
+                await until(lambda: json.loads(record_path.read_text())["name"] == "planner")
+                await rig.fake.notify("thread/status/changed", {"threadId": THREAD_ID, "status": {"type": "active", "activeFlags": []}})
+                await until(lambda: json.loads(record_path.read_text())["status"] == "busy")
+                child_pid = thread.child_pid
+                await rig.bridge.dispatch("stop", {"target": "planner"}, HUMAN)
+                await until(lambda: not record_path.exists())
+                return child_pid, record, os.path.exists(record["messagingSocketPath"]), rig.bridge.children
+            finally:
+                claude.close()
+
+    child_pid, record, socket_left, children = run(body())
+    assert record["name"] == "helper"
+    assert record["pid"] == child_pid
+    assert record["cwd"] == str(short_tmp / "work")
+    assert record["version"] == "2.1.278"
+    assert record["messagingSocketPath"] == str(short_tmp / "socks" / f"{child_pid}.sock")
+    assert socket_left is False
+    assert children == {}
+
+
+def test_deliver_to_spawner_reaches_a_claude_spawner_by_session_id_and_logs_a_gone_one(short_tmp, caplog):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            spawner = Caller(kind="claude", claude_pid=claude.pid, claude_session_id=claude.record["sessionId"], codex_thread=None)
+            try:
+                await rig.start_thread(caller=spawner)
+                thread = rig.bridge.state.threads[THREAD_ID]
+                delivered = await rig.bridge.deliver_to_spawner(thread, "the answer is 42")
+                [frame] = await asyncio.to_thread(claude.wait_for_frames, 1, 2.0)
+                claude.record_path.unlink()
+                with caplog.at_level(logging.WARNING, logger="antiphon.bridge"):
+                    gone = await rig.bridge.deliver_to_spawner(thread, "again")
+                return delivered, frame, gone
+            finally:
+                claude.close()
+
+    delivered, frame, gone = run(body())
+    assert delivered is True
+    assert frame["type"] == "user"
+    assert "the answer is 42" in frame["message"]["content"]
+    assert 'from-name="helper"' in frame["message"]["content"]
+    assert gone is False
+    assert "spawner" in caplog.text and "gone" in caplog.text
+
+
+def test_deliver_to_spawner_into_a_codex_spawner_is_a_turn_on_that_thread(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(name="parent")
+            second = json.loads(json.dumps(THREAD_START.result(2)).replace(THREAD_ID, "01a0c390-0000-7000-8000-000000000002"))
+            rig.fake.replies["thread/start"] = {"result": second}
+            spawner = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread=THREAD_ID)
+            await rig.start_thread(name="child", caller=spawner)
+            child = rig.bridge.state.threads["01a0c390-0000-7000-8000-000000000002"]
+            delivered = await rig.bridge.deliver_to_spawner(child, "child says hi")
+            return delivered, rig.fake.received("turn/start")[-1]["params"]
+
+    delivered, params = run(body())
+    assert delivered is True
+    assert params["threadId"] == THREAD_ID
+    assert params["input"] == [{"type": "text", "text": "child says hi"}]
+
+
+def test_a_child_that_dies_is_forgotten_and_respawned_on_the_next_reconcile(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread()
+                thread = rig.bridge.state.threads[THREAD_ID]
+                first = thread.child_pid
+                os.kill(first, 9)
+                await until(lambda: thread.child_pid is None)
+                await rig.bridge.reconcile()
+                return first, thread.child_pid
+            finally:
+                claude.close()
+
+    first, second = run(body())
+    assert first is not None and second is not None and first != second

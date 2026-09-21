@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 from antiphon import callers, ipc
@@ -40,11 +41,102 @@ PINNED_METHODS = ("thread/loaded/list", "turn/steer", "thread/resume")
 METHOD_NOT_FOUND = -32601
 WAIT_DEFAULT_TIMEOUT = 600.0
 DAEMON_WAIT = 3.0
+REGISTER_TIMEOUT = 10.0
+DELIVER_TIMEOUT = 10.0
+CHILD_EXIT_TIMEOUT = 3.0
+CHILD_LINE_LIMIT = 16 * 1024 * 1024  # a final answer relayed through the child can be long
 IDLE_DETAIL_CHARS = 200
 
 
 class AlreadyRunning(Exception):
     """Another bridge answers on the control socket."""
+
+
+class PeerChild:
+    """One peer child process: the live pid, registry record and messaging socket of a
+    hosted thread, driven over its stdin/stdout with one JSON line per command or event.
+
+    `ready` and the `sent`/`send_failed` answers to `deliver` are resolved here in
+    command order (the child handles commands one at a time); every other event goes
+    to `on_event(thread_id, event)`, plus `{"ev": "exited"}` once the child is gone.
+    """
+
+    def __init__(self, thread_id: str, log_path: Path, config_dir: Path, on_event):
+        self.thread_id = thread_id
+        self.log_path = log_path
+        self.config_dir = config_dir
+        self.on_event = on_event
+        self.proc: asyncio.subprocess.Process | None = None
+        self._ready: asyncio.Future | None = None
+        self._deliveries: deque[asyncio.Future] = deque()
+        self._reader: asyncio.Task | None = None
+
+    @property
+    def pid(self) -> int:
+        return self.proc.pid
+
+    async def spawn(self) -> None:
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(self.config_dir)}
+        with open(self.log_path, "ab") as log_file:
+            self.proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "antiphon.claude.peer",
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=log_file,
+                env=env, limit=CHILD_LINE_LIMIT,
+            )
+        self._reader = asyncio.create_task(self._read(), name=f"antiphon-peer-{self.thread_id[:8]}")
+
+    async def send(self, **cmd) -> None:
+        self.proc.stdin.write(json.dumps(cmd).encode() + b"\n")
+        await self.proc.stdin.drain()
+
+    async def register(self, **fields) -> dict:
+        self._ready = asyncio.get_running_loop().create_future()
+        await self.send(cmd="register", **fields)
+        return await asyncio.wait_for(self._ready, REGISTER_TIMEOUT)
+
+    async def deliver(self, to_sock: str, text: str, from_name: str) -> str | None:
+        """Send a user frame to a peer socket; the failure reason, or None once it was written."""
+        outcome = asyncio.get_running_loop().create_future()
+        self._deliveries.append(outcome)
+        await self.send(cmd="deliver", to_sock=to_sock, text=text, from_name=from_name)
+        return await asyncio.wait_for(outcome, DELIVER_TIMEOUT)
+
+    async def close(self) -> None:
+        if self.proc.returncode is None:
+            try:
+                await self.send(cmd="exited")
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # already exiting; stdin EOF below is the same signal
+            self.proc.stdin.close()
+            try:
+                await asyncio.wait_for(self.proc.wait(), CHILD_EXIT_TIMEOUT)
+            except TimeoutError:
+                log.warning("peer child %s did not exit; killing it", self.pid)
+                self.proc.kill()
+                await self.proc.wait()
+        await self._reader
+
+    async def _read(self) -> None:
+        try:
+            async for raw in self.proc.stdout:
+                event = json.loads(raw)
+                kind = event["ev"]
+                if kind == "ready":
+                    self._ready.set_result(event)
+                elif kind == "sent" and self._deliveries:
+                    self._deliveries.popleft().set_result(None)
+                elif kind == "send_failed" and "msg_id" in event and self._deliveries:
+                    self._deliveries.popleft().set_result(event["reason"])
+                else:
+                    await self.on_event(self.thread_id, event)
+        finally:
+            for outcome in self._deliveries:
+                if not outcome.done():
+                    outcome.set_result("peer child exited")
+            if self._ready is not None and not self._ready.done():
+                self._ready.set_exception(RuntimeError("peer child exited before it was ready"))
+            await self.proc.wait()
+            await self.on_event(self.thread_id, {"ev": "exited", "rc": self.proc.returncode})
 
 
 def _status_of(thread: dict) -> str:
@@ -105,6 +197,7 @@ class Bridge:
             # Children die with the bridge (stdin EOF), so none of them survived a restart.
             thread.child_pid = None
         self.daemon: Daemon | None = None
+        self.children: dict[str, PeerChild] = {}
         self.subscribed: dict[str, int] = {}  # thread id -> the epoch it was resumed on
         self.pin_failures: list[str] = []
         self.codex_failures: dict[str, str] = {}
@@ -138,6 +231,15 @@ class Bridge:
             "item/autoApprovalReview/started": self.log_notification,
             "item/autoApprovalReview/completed": self.log_notification,
         }
+        self.child_events = {
+            "inbound": self.on_child_inbound,
+            "send_failed": self.on_child_send_failed,
+            "status": self.log_child_event,
+            "idle_notice": self.log_child_event,
+            "subscribed": self.log_child_event,
+            "unknown_frame": self.on_child_unknown_frame,
+            "exited": self.on_child_exited,
+        }
 
     # --- lifecycle ---------------------------------------------------------------
 
@@ -164,6 +266,8 @@ class Bridge:
 
     async def close(self) -> None:
         self._closing = True
+        for child in list(self.children.values()):
+            await child.close()
         for task in list(self._tasks):
             task.cancel()
         for task in list(self._tasks):
@@ -375,7 +479,11 @@ class Bridge:
         self.save()
 
     def _set_status(self, thread: ThreadState, status: str) -> None:
+        if thread.status == status:
+            return
         thread.status = status
+        if thread.thread_id in self.children:
+            self._spawn(self._child_cmd(thread, cmd="status", status=status), "antiphon-child-status")
 
     def _sub_agent(self, thread_id: str) -> SubAgent | None:
         for thread in self.state.threads.values():
@@ -415,6 +523,9 @@ class Bridge:
         unknown = [tid for tid in loaded if tid not in known]
         if unknown:
             await self._adopt(d, unknown)
+        for thread in list(self.state.threads.values()):
+            if thread.child_pid is None:
+                await self.ensure_peer(thread)
 
     async def _subscribe(self, d: Daemon, thread: ThreadState) -> None:
         try:
@@ -471,19 +582,144 @@ class Bridge:
         self.state.threads.pop(thread.thread_id, None)
         self.subscribed.pop(thread.thread_id, None)
 
-    # --- peer children (wired by the peer module) ------------------------------------------
+    # --- peer children ------------------------------------------------------------------
+
+    async def ensure_peer(self, thread: ThreadState) -> None:
+        """Register the thread in Claude Code's registry through a child of its own, when a
+        live Claude session exists to copy the record shape from and no pin has failed."""
+        if thread.thread_id in self.children:
+            return
+        if self.pin_failures:
+            log.info("not registering %s while degraded: %s", thread.name, "; ".join(self.pin_failures))
+            return
+        records = [r for r in self.live_records() if {"version", "pidDomain", "messagingSocketPath"} <= r.data.keys()]
+        if not records:
+            log.info("thread %s: waiting for a Claude Code session to copy the peer record shape from", thread.name)
+            return
+        record = records[0]
+        child = PeerChild(thread.thread_id, self.home / "log" / f"peer-{thread.thread_id[:8]}.log",
+                          self.sessions_dir.parent, self._on_child_event)
+        await child.spawn()
+        self.children[thread.thread_id] = child
+        try:
+            ready = await child.register(
+                name=thread.name, cwd=thread.cwd, version=record.data["version"], pidDomain=record.data["pidDomain"],
+                socket_dir=os.path.dirname(record.socket_path), status=thread.status,
+            )
+        except (TimeoutError, RuntimeError, ConnectionError) as e:
+            # The thread stays hosted without a peer identity; the next reconcile tries again.
+            log.error("peer child for %s did not register: %r (see %s)", thread.name, e, child.log_path)
+            await child.close()
+            return
+        thread.child_pid = ready["pid"]
+        self.save()
+        log.info("registered %s as a Claude Code peer (pid %s, socket %s)", thread.name, ready["pid"], ready["sock"])
+
+    async def _child_cmd(self, thread: ThreadState, **cmd) -> None:
+        child = self.children.get(thread.thread_id)
+        if child is None:
+            return
+        try:
+            await child.send(**cmd)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            # The child is gone; its exit event forgets it and reconcile respawns it.
+            log.warning("peer child of %s is not reading: %r", thread.name, e)
 
     async def _child_idle(self, thread: ThreadState, detail: str) -> None:
-        pass
+        await self._child_cmd(thread, cmd="idle", detail=detail)
 
     async def _child_rename(self, thread: ThreadState) -> None:
-        pass
+        await self._child_cmd(thread, cmd="rename", name=thread.name)
 
     async def _child_exited(self, thread: ThreadState) -> None:
-        pass
+        child = self.children.pop(thread.thread_id, None)
+        if child is not None:
+            thread.child_pid = None
+            await child.close()
+
+    async def _on_child_event(self, thread_id: str, event: dict) -> None:
+        handler = self.child_events.get(event["ev"])
+        if handler is None:
+            log.warning("peer child of %s sent an event this bridge does not know: %s", thread_id, event)
+            return
+        await handler(thread_id, event)
+
+    async def on_child_inbound(self, thread_id: str, event: dict) -> None:
+        thread = self.state.threads.get(thread_id)
+        if thread is None:
+            return
+        # Delivering may wait on the daemon; the child's reader must not.
+        self._spawn(self._relay_inbound(thread, event), "antiphon-relay-inbound")
+
+    async def _relay_inbound(self, thread: ThreadState, event: dict) -> None:
+        text = f"[from {event['from_name']} via antiphon]\n{event['text']}"
+        try:
+            await self._deliver_into(thread, text)
+        except (IpcError, DaemonError, TransportClosed, TimeoutError) as e:
+            reason = e.error.get("message", str(e)) if isinstance(e, DaemonError) else str(e)
+            log.warning("message from %s to %s not delivered: %s", event["from_name"], thread.name, reason)
+            await self._child_cmd(thread, cmd="deliver_failed", msg_id=event["msg_id"], reason=reason)
+
+    async def on_child_send_failed(self, thread_id: str, event: dict) -> None:
+        log.warning("peer at %s is gone: %s", event.get("to_sock"), event.get("reason"))
+
+    async def log_child_event(self, thread_id: str, event: dict) -> None:
+        log.info("peer child of %s: %s", thread_id, event)
+
+    async def on_child_unknown_frame(self, thread_id: str, event: dict) -> None:
+        log.warning("unknown frame on the peer socket of %s: %s", thread_id, event.get("raw"))
+
+    async def on_child_exited(self, thread_id: str, event: dict) -> None:
+        # A child the bridge closed itself was forgotten before the exit; anything
+        # still listed here died on its own.
+        if self.children.pop(thread_id, None) is None:
+            return
+        thread = self.state.threads.get(thread_id)
+        if thread is not None:
+            log.warning("peer child of %s exited (rc %s); it is respawned on the next reconcile", thread.name, event.get("rc"))
+            thread.child_pid = None
+            self.save()
 
     async def deliver_to_spawner(self, thread: ThreadState, text: str) -> bool:
-        return False
+        """Get `text` to whoever spawned `thread`: a Claude session's socket (looked up by
+        session id now, since the session's pid may have changed), a Codex thread as a turn,
+        or, for a human, nowhere but the log. True when it was handed over."""
+        spawner = thread.spawner
+        if spawner == "human":
+            log.info("%s reports to a human; nothing to deliver to: %.80s", thread.name, text)
+            return False
+        if spawner in self.state.threads:
+            try:
+                await self._deliver_into(self.state.threads[spawner], text)
+            except (IpcError, DaemonError, TransportClosed, TimeoutError) as e:
+                log.warning("could not deliver %s's report into its spawner thread: %r", thread.name, e)
+                return False
+            return True
+        record = registry.resolve_session(spawner, self.sessions_dir)
+        if record is None:
+            log.warning("spawner %s of %s is gone (no live Claude record); dropping: %.80s", spawner, thread.name, text)
+            return False
+        child = self.children.get(thread.thread_id)
+        if child is None:
+            log.warning("%s has no peer child to deliver from; dropping: %.80s", thread.name, text)
+            return False
+        reason = await child.deliver(record.socket_path, text, thread.name)
+        if reason is not None:
+            log.warning("delivery from %s to its spawner failed: %s", thread.name, reason)
+            return False
+        return True
+
+    async def _deliver_into(self, thread: ThreadState, text: str):
+        """Steer or start a turn on a hosted thread, resuming it first if it was unloaded."""
+        d = await self._require_daemon()
+        if thread.status == "unloaded":
+            await d.thread_resume(thread.thread_id)
+            self.subscribed[thread.thread_id] = d.epoch
+        delivery = await deliver(d, thread.thread_id, text, self._sandbox_policy(thread))
+        thread.active_turn_id = delivery.turn_id
+        self._set_status(thread, "busy")
+        self.save()
+        return delivery
 
     # --- names ---------------------------------------------------------------------------
 
@@ -577,17 +813,10 @@ class Bridge:
     async def op_send(self, args: dict, caller: Caller) -> dict:
         thread = self.resolve(args["target"])
         text = args["text"]
-        d = await self._require_daemon()
         try:
-            if thread.status == "unloaded":
-                await d.thread_resume(thread.thread_id)
-                self.subscribed[thread.thread_id] = d.epoch
-            delivery = await deliver(d, thread.thread_id, text, self._sandbox_policy(thread))
+            delivery = await self._deliver_into(thread, text)
         except DaemonError as e:
             raise IpcError("delivery_rejected", f"{e.method}: {e.error.get('message')}", e.error) from e
-        thread.active_turn_id = delivery.turn_id
-        self._set_status(thread, "busy")
-        self.save()
         return {"kind": delivery.kind, "turn_id": delivery.turn_id, "thread_id": thread.thread_id, "name": thread.name}
 
     async def op_interrupt(self, args: dict, caller: Caller) -> dict:
@@ -719,10 +948,6 @@ class Bridge:
         await self._child_rename(thread)
         self.save()
         return {"name": name, "thread_id": thread.thread_id}
-
-    async def ensure_peer(self, thread: ThreadState) -> None:
-        pass
-
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(name)s %(levelname)s %(message)s")
