@@ -197,6 +197,7 @@ class Bridge:
             # Children die with the bridge (stdin EOF), so none of them survived a restart.
             thread.child_pid = None
         self.daemon: Daemon | None = None
+        self.connected_once = False
         self.children: dict[str, PeerChild] = {}
         self.subscribed: dict[str, int] = {}  # thread id -> the epoch it was resumed on
         self.pin_failures: list[str] = []
@@ -328,14 +329,18 @@ class Bridge:
 
     # --- daemon connection ----------------------------------------------------------
 
-    async def _require_daemon(self) -> Daemon:
+    async def _wait_for_daemon(self) -> Daemon | None:
         """The live daemon connection, waiting briefly for the one a fresh bridge is still making."""
         deadline = time.monotonic() + DAEMON_WAIT
         while self.daemon is None and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
-        if self.daemon is None:
-            raise IpcError("daemon_unreachable", "the Codex daemon is not connected; the bridge is reconnecting")
         return self.daemon
+
+    async def _require_daemon(self) -> Daemon:
+        d = await self._wait_for_daemon()
+        if d is None:
+            raise IpcError("daemon_unreachable", "the Codex daemon is not connected; the bridge is reconnecting")
+        return d
 
     async def _connect_loop(self) -> None:
         delay = self.reconnect_backoff[0]
@@ -343,19 +348,25 @@ class Bridge:
             try:
                 path = await asyncio.to_thread(self._ensure_running, self.codex_home, self.rawlog)
                 d = await Daemon.connect(path, self._on_notification, self._on_server_request, rawlog=self.rawlog)
-            except DaemonError as e:
-                # The daemon answered `initialize` with an error: it speaks a protocol we do not.
+            except (DaemonError, KeyError, TypeError) as e:
+                # The daemon refused `initialize` or answered it in a shape the client cannot
+                # read: it speaks a protocol we do not.
                 self.codex_failures["initialize"] = "codex protocol: initialize unsupported"
                 self._update_degraded()
-                log.error("initialize refused: %r; retrying in %s s", e, delay)
+                log.error("initialize failed: %r; retrying in %s s", e, delay)
             except (DaemonUnavailable, OSError, TransportClosed, TimeoutError) as e:
                 # A restarting or absent daemon: keep trying, with the CLI reporting exit 5 meanwhile.
                 log.warning("daemon unreachable: %r; retrying in %s s", e, delay)
+            except Exception:
+                # Whatever else went wrong, a bridge that stops reconnecting is worse than one
+                # that logs the traceback and tries again.
+                log.exception("connecting to the daemon failed; retrying in %s s", delay)
             else:
                 delay = self.reconnect_backoff[0]
                 self.codex_failures.pop("initialize", None)
                 self._watch_pinned_methods(d)
                 self.daemon = d
+                self.connected_once = True
                 self.subscribed.clear()
                 self._update_degraded()
                 log.info("connected to the Codex daemon (epoch %s, codex %s)", d.epoch, d.codex_version)
@@ -512,6 +523,9 @@ class Bridge:
                 # The connection went away mid-pass or the daemon refused a call; the
                 # next pass (or the reconnect) starts over from the daemon's truth.
                 log.warning("reconcile interrupted: %r", e)
+            except Exception:
+                # A reply in a shape this bridge cannot read must not stop every later pass.
+                log.exception("reconcile failed; the next pass starts over")
             self.last_reconcile = time.time()
             self.save()
 
@@ -780,6 +794,9 @@ class Bridge:
     # --- ops ---------------------------------------------------------------------------------
 
     async def op_ping(self, args: dict, caller: Caller) -> dict:
+        if not self.connected_once:
+            # A bridge the CLI just started is still making its first connection.
+            await self._wait_for_daemon()
         self._check_pins()
         claude_versions = [r.data["version"] for r in self.live_records() if "version" in r.data]
         return {

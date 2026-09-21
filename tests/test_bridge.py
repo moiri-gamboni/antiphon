@@ -412,6 +412,58 @@ def test_daemon_reconnect_resubscribes_every_hosted_thread_on_a_new_epoch(short_
     assert connections == 2
 
 
+def test_ping_right_after_start_waits_for_the_first_daemon_connection(short_tmp):
+    async def body():
+        rig = Rig(short_tmp)
+        await rig.bridge.start()
+        try:
+            pinging = asyncio.create_task(rig.bridge.dispatch("ping", {}, HUMAN))
+            await asyncio.sleep(0.3)
+            await rig.fake.start()
+            return await asyncio.wait_for(pinging, 5)
+        finally:
+            await rig.bridge.close()
+            await rig.fake.stop()
+
+    assert run(body())["daemon"] is True
+
+
+def test_an_initialize_reply_of_an_unknown_shape_degrades_and_keeps_retrying(short_tmp):
+    async def body():
+        rig = Rig(short_tmp)
+        rig.fake.replies["initialize"] = {"result": {"codexHome": "~/.codex"}}
+        await rig.fake.start()
+        await rig.bridge.start()
+        try:
+            await until(lambda: rig.bridge.state.degraded == ["codex protocol: initialize unsupported"])
+            rig.fake.replies["initialize"] = {"result": THREAD_START.result(1)}
+            await until(lambda: rig.bridge.daemon is not None)
+            return rig.bridge.state.degraded
+        finally:
+            await rig.bridge.close()
+            await rig.fake.stop()
+
+    assert run(body()) == []
+
+
+def test_a_thread_read_of_an_unknown_shape_fails_one_pass_and_the_next_pass_still_runs(short_tmp, caplog):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/loaded/list"] = {"result": {"data": [ADOPTED_ID], "nextCursor": None}}
+            rig.fake.replies["thread/read"] = {"result": {"thread": {"id": ADOPTED_ID, "status": {"type": "idle"}}}}
+            with caplog.at_level(logging.ERROR, logger="antiphon.bridge"):
+                await rig.bridge.reconcile()
+            failed = list(rig.bridge.state.threads)
+            rig.fake.replies["thread/read"] = {"result": ADOPTION.result(2)}
+            await rig.bridge.reconcile()
+            return failed, list(rig.bridge.state.threads)
+
+    failed, recovered = run(body())
+    assert failed == []
+    assert recovered == [ADOPTED_ID]
+    assert "reconcile failed" in caplog.text and "KeyError" in caplog.text
+
+
 def test_ping_reports_the_daemon_unreachable_while_it_is_down(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
