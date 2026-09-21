@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from antiphon.codex import ws
 
-log = logging.getLogger("antiphon.codex")
+log = logging.getLogger(__name__)
 
 HEADLESS_INSTRUCTIONS = """\
 This thread runs headless: no human is watching a terminal for it. It was started by another session over antiphon, and that session reads your final answer when the turn ends.

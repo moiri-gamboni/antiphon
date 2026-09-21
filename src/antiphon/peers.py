@@ -25,7 +25,7 @@ from antiphon.state import ThreadState
 if TYPE_CHECKING:
     from antiphon.bridge import Bridge, PeerChild
 
-log = logging.getLogger("antiphon.peers")
+log = logging.getLogger(__name__)
 
 # Claude Code sends no receipt for a message it took (observed), so a send that hears
 # nothing for this long reports success. The negative receipt's shape (`status`,

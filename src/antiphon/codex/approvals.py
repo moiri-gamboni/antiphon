@@ -36,7 +36,7 @@ from antiphon.state import ThreadState
 if TYPE_CHECKING:
     from antiphon.bridge import Bridge
 
-log = logging.getLogger("antiphon.approvals")
+log = logging.getLogger(__name__)
 
 REQUEST_APPROVAL = "item/commandExecution/requestApproval"
 REMIND_AFTER = 600.0

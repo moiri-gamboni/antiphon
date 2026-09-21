@@ -35,7 +35,7 @@ from antiphon.ipc import IpcError
 from antiphon.rawlog import RawLog
 from antiphon.state import State, SubAgent, ThreadState, ensure_home
 
-log = logging.getLogger("antiphon.bridge")
+log = logging.getLogger(__name__)
 
 # Daemon methods whose disappearance means the protocol moved under us.
 PINNED_METHODS = ("thread/loaded/list", "turn/steer", "thread/resume")

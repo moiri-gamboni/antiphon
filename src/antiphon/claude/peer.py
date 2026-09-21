@@ -44,7 +44,7 @@ import uuid
 
 from antiphon.claude import registry
 
-log = logging.getLogger("antiphon.claude.peer")
+log = logging.getLogger(__name__)
 
 # asyncio's default line limit is 64 KiB; a Codex final answer or a Claude message can be
 # longer, and a frame over the limit would be dropped (socket side) or fatal (stdin side).

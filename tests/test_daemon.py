@@ -221,7 +221,7 @@ def test_a_raising_notification_handler_is_logged_with_the_raw_frame_and_the_rea
         fake = FakeDaemon(tmp_path / "daemon.sock")
         await fake.start()
         d = await Daemon.connect(fake.socket_path, handler, no_server_requests)
-        with caplog.at_level(logging.ERROR, logger="antiphon.codex"):
+        with caplog.at_level(logging.ERROR, logger="antiphon.codex.daemon"):
             await fake.notify("turn/started", started)
             await fake.notify("turn/completed", completed)
             await until(lambda: seen)
@@ -291,7 +291,7 @@ def test_a_malformed_frame_from_the_daemon_ends_the_connection_loudly(tmp_path, 
             h.fake.replies["thread/read"] = lambda params: None
             pending = asyncio.ensure_future(h.daemon.request("thread/read", {"threadId": "x"}))
             await h.fake.wait_request("thread/read")
-            with caplog.at_level(logging.ERROR, logger="antiphon.codex"):
+            with caplog.at_level(logging.ERROR, logger="antiphon.codex.daemon"):
                 await h.fake.conn.send_frame(0x1, b"not json")
                 with pytest.raises(TransportClosed) as info:
                     await asyncio.wait_for(pending, 2)

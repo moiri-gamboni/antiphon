@@ -16,7 +16,7 @@ import socket
 import struct
 import sys
 
-log = logging.getLogger("antiphon.ipc")
+log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 1
 
