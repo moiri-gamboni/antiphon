@@ -34,6 +34,8 @@ Messages prefixed "[from <name> via antiphon]" come from other sessions on this 
 
 START_COMMAND = ["codex", "app-server", "daemon", "start"]
 
+INTERNAL_ERROR = -32603  # JSON-RPC: the handler failed
+
 # Streaming deltas would arrive several times a second per active thread and
 # the bridge only acts on completed items, so the daemon is asked not to send them.
 OPT_OUT_NOTIFICATIONS = [
@@ -291,8 +293,15 @@ class Daemon:
                     await self._on_server_request(message["id"], message["method"], message.get("params"))
                 else:
                     await self._on_notification(message["method"], message.get("params"))
-            except Exception:
+            except Exception as e:
                 log.exception("handler raised on %s", text)
+                if "id" in message:
+                    # The daemon is waiting on this request; an unanswered one blocks the
+                    # turn with no token to act on, so answer it with the error instead.
+                    try:
+                        await self.respond_error(message["id"], INTERNAL_ERROR, f"antiphon handler failed: {e!r}")
+                    except ws.TransportClosed:
+                        pass
 
 
 async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | None, effort: str | None = None) -> Delivery:

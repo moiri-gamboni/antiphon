@@ -234,6 +234,30 @@ def test_a_raising_notification_handler_is_logged_with_the_raw_frame_and_the_rea
     assert '"method": "turn/started"' in record.getMessage()
 
 
+def test_a_raising_server_request_handler_answers_the_request_with_an_error(tmp_path):
+    request = APPROVAL.server_requests("item/commandExecution/requestApproval")[0]
+
+    async def on_server_request(request_id, method, params):
+        raise RuntimeError("handler bug")
+
+    async def no_notifications(*args):
+        raise AssertionError("no notification expected")
+
+    async def body():
+        fake = FakeDaemon(tmp_path / "daemon.sock")
+        await fake.start()
+        d = await Daemon.connect(fake.socket_path, no_notifications, on_server_request)
+        request_id = await fake.server_request(request["method"], request["params"])
+        answer = await asyncio.wait_for(fake.response(request_id), 2)
+        await d.close()
+        await fake.stop()
+        return answer
+
+    answer = run(body())
+    assert answer["error"]["code"] == -32603
+    assert "handler bug" in answer["error"]["message"]
+
+
 def test_dropped_connection_fails_pending_requests_and_marks_the_daemon_closed(tmp_path):
     async def body():
         async with Harness(tmp_path) as h:
