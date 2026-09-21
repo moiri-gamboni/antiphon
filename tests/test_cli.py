@@ -355,6 +355,20 @@ def test_every_op_carries_the_callers_claimed_thread(rig, monkeypatch, capsys):
     assert seen[-1] == ("ls", "01a0c390-e298-7b53-87d2-3333c99c6ac4")
 
 
+def test_a_codex_caller_is_refused_by_the_cli_with_exit_2(rig):
+    assert rig.run_subprocess("start", "-n", "helper", "-C", str(rig.tmp)).returncode == 0
+    # The bridge classifies callers by the command name of their ancestors: a shell
+    # copied to a file named `codex` makes the CLI it runs a Codex caller.
+    codex = rig.tmp / "codexbin" / "codex"
+    codex.parent.mkdir()
+    codex.write_bytes(Path(os.path.realpath("/bin/sh")).read_bytes())
+    codex.chmod(0o755)
+    done = subprocess.run([str(codex), "-c", f"{sys.executable} -m antiphon stop helper"], capture_output=True, text=True)
+    assert done.returncode == 2, done.stderr
+    assert "codex caller" in done.stderr and "may not stop" in done.stderr
+    assert rig.run_subprocess("stop", "helper").returncode == 0
+
+
 def test_ping_shows_both_versions_and_the_peer_count(rig, capsys):
     claude = FakeClaude(rig.config_dir / "sessions", rig.tmp / "socks", name="claude-main")
     try:

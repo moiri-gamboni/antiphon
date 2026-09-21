@@ -366,3 +366,93 @@ def test_requests_on_an_adopted_thread_are_never_answered(short_tmp):
 
     assert run(body()) == ("adopted", None, None, [])
 
+# --- ownership: who may act on a thread ---------------------------------------------
+
+OTHER_ID = "01a0c390-0000-7000-8000-000000000002"
+CLAUDE_STRANGER = Caller(kind="claude", claude_pid=4242, claude_session_id="8d0b3e2e-2f3f-4d33-9a5a-8f0b7d1a8e11", codex_thread=None)
+
+
+def second_thread_reply() -> dict:
+    return {"result": json.loads(json.dumps(load_fixture("thread-start.jsonl").result(2)).replace(THREAD_ID, OTHER_ID))}
+
+
+def test_a_codex_caller_may_not_approve_stop_interrupt_or_rename_a_thread_it_did_not_spawn(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            await denied(rig)
+            errors = {}
+            for op, args in [("approve", {"token": DENIED_TOKEN}), ("deny", {"token": DENIED_TOKEN, "why": "no"}),
+                             ("stop", {"target": "helper"}), ("interrupt", {"target": "helper"}), ("name", {"target": "helper", "new": "mine"})]:
+                with pytest.raises(ipc.IpcError) as err:
+                    await rig.bridge.dispatch(op, args, CODEX_STRANGER)
+                errors[op] = err.value
+            return errors, [r["method"] for r in rig.fake.requests if r["method"] not in ("initialize", "thread/loaded/list", "thread/start", "thread/name/set")], THREAD_ID in rig.bridge.state.threads
+
+    errors, other_calls, still_hosted = run(body())
+    assert {op: e.kind for op, e in errors.items()} == dict.fromkeys(["approve", "deny", "stop", "interrupt", "name"], "forbidden")
+    assert errors["approve"].message == f"codex caller ({CODEX_STRANGER.codex_thread}) may not approve a thread spawned by {run_spawner_id()!r}"
+    assert other_calls == []
+    assert still_hosted
+
+
+def run_spawner_id() -> str:
+    """The session id of the rig's Claude spawner (the captured record's, reused by every rig)."""
+    from fake_claude import captured_events
+
+    return captured_events("peer-frames.jsonl")[0]["data"]["sessionId"]
+
+
+def test_a_codex_caller_may_send_to_read_and_wait_on_a_thread_it_did_not_spawn(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            sent = await rig.bridge.dispatch("send", {"target": "helper", "text": "hello"}, CODEX_STRANGER)
+            status = await rig.bridge.dispatch("status", {"target": "helper"}, CODEX_STRANGER)
+            waited = await rig.bridge.dispatch("wait", {"target": "helper", "timeout": 1}, CODEX_STRANGER) if status["status"] == "idle" else None
+            return sent["kind"], status["name"], waited
+
+    kind, name, waited = run(body())
+    assert kind == "started"
+    assert name == "helper"
+
+
+def test_a_codex_caller_acts_freely_on_the_thread_it_spawned_and_may_rename_itself(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/approveGuardianDeniedAction"] = {"result": {}}
+            await rig.start_thread(name="parent")
+            me = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread=THREAD_ID)
+            rig.fake.replies["thread/start"] = second_thread_reply()
+            await rig.bridge.dispatch("start", dict(cwd=str(rig.tmp / "work"), name="child", read_only=False, report=True, worktree=False, review_by_parent=False), me)
+            await rig.fake.notify("item/autoApprovalReview/completed", for_thread(REVIEW_DENIED, OTHER_ID))
+            await until(lambda: rig.bridge.state.threads[OTHER_ID].pending)
+            approved = await rig.bridge.dispatch("approve", {"token": DENIED_TOKEN}, me)
+            renamed = await rig.bridge.dispatch("name", {"target": "parent", "new": "renamed"}, me)
+            stopped = await rig.bridge.dispatch("stop", {"target": "child"}, me)
+            return approved["name"], renamed["name"], stopped["name"], rig.bridge.state.threads[THREAD_ID].spawner
+
+    assert run(body()) == ("child", "renamed", "child", run_spawner_id())
+
+
+def test_a_claude_session_may_approve_a_thread_another_session_spawned(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/approveGuardianDeniedAction"] = {"result": {}}
+            await rig.start_thread()
+            await denied(rig)
+            return (await rig.bridge.dispatch("approve", {"token": DENIED_TOKEN}, CLAUDE_STRANGER))["token"]
+
+    assert run(body()) == DENIED_TOKEN
+
+
+def test_a_claude_caller_running_notify_is_told_to_use_send_message(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            with pytest.raises(ipc.IpcError) as err:
+                await rig.bridge.dispatch("notify", {"target": "helper"}, CLAUDE_STRANGER)
+            return err.value
+
+    err = run(body())
+    assert err.kind == "usage"
+    assert "use SendMessage with notify_when_idle" in err.message

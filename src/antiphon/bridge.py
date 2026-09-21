@@ -40,6 +40,8 @@ log = logging.getLogger("antiphon.bridge")
 # Daemon methods whose disappearance means the protocol moved under us.
 PINNED_METHODS = ("thread/loaded/list", "turn/steer", "thread/resume")
 METHOD_NOT_FOUND = -32601
+# Ops that act on one thread, gated by who spawned it.
+OWNED_OPS = frozenset({"send", "interrupt", "stop", "name", "approve", "deny", "wait", "status"})
 WAIT_DEFAULT_TIMEOUT = 600.0
 DAEMON_WAIT = 3.0
 REGISTER_TIMEOUT = 10.0
@@ -320,13 +322,30 @@ class Bridge:
                                 known_threads=self.state.threads.keys(), table=self._process_table)
 
     async def dispatch(self, op: str, args: dict, caller: Caller):
+        if op == "notify" and caller.kind == "claude":
+            raise IpcError("usage", "a Claude Code session subscribes natively: use SendMessage with notify_when_idle")
         handler = self.ops.get(op)
         if handler is None:
             raise IpcError("unknown_op", f"unknown op {op!r}")
         try:
+            self._check_ownership(op, args, caller)
             return await handler(args, caller)
         except KeyError as e:
             raise IpcError("usage", f"{op} needs argument {e.args[0]!r}") from e
+
+    def _check_ownership(self, op: str, args: dict, caller: Caller) -> None:
+        """The ownership rule: a caller drives, stops and approves what it spawned; a
+        Claude session or a human may do so to any thread."""
+        if op not in OWNED_OPS or (op == "status" and not args.get("target")):
+            return
+        if op in ("approve", "deny"):
+            thread, _ = self.approvals.find(args["token"])
+        else:
+            thread = self.resolve(args["target"])
+        # A Codex thread renaming itself is not acting on another caller's thread.
+        spawner = None if op == "name" and thread.thread_id == caller.codex_thread else thread.spawner
+        if not callers.permits(caller, op, spawner):
+            raise IpcError("forbidden", callers.forbidden_message(caller, op, spawner))
 
     def live_records(self) -> list[registry.Record]:
         return registry.live_records(self.sessions_dir)
