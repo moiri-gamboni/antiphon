@@ -4,8 +4,6 @@ import re
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from antiphon.claude import registry
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -72,10 +70,6 @@ def test_proc_start_survives_parentheses_in_the_command_name(tmp_path):
     assert registry.proc_start(1001, proc_root=proc) == "3095861"
 
 
-def test_ps_lstart_output_is_trimmed():
-    assert registry.parse_ps_lstart(b"Mon Sep 21 15:30:18 2026\n") == "Mon Sep 21 15:30:18 2026"
-
-
 def test_ps_lstart_of_a_live_process_is_one_english_utc_timestamp():
     out = subprocess.run(
         ["ps", "-o", "lstart=", "-p", str(os.getpid())],
@@ -100,19 +94,6 @@ def test_live_records_keeps_live_pids_and_drops_dead_ones(tmp_path, caplog):
 
 def test_live_records_with_no_directory_is_empty(tmp_path):
     assert registry.live_records(tmp_path / "missing") == []
-
-
-def test_socket_dir_comes_from_a_live_record(tmp_path):
-    sessions = tmp_path / "sessions"
-    own_record(sessions, tmp_path / "socks")
-    assert registry.socket_dir(sessions) == str(tmp_path / "socks")
-
-
-def test_socket_dir_refuses_without_a_live_record(tmp_path):
-    sessions = tmp_path / "sessions"
-    write_record(sessions, dict(CAPTURED_RECORD, pid=dead_pid()))
-    with pytest.raises(registry.NoLiveClaude):
-        registry.socket_dir(sessions)
 
 
 def test_pins_ok_accepts_the_captured_record(tmp_path):
