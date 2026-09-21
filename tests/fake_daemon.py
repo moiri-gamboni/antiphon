@@ -19,9 +19,9 @@ notification, send a server request, or drop the connection.
     await fake.stop()
 
 A reply dict is `{"result": ...}` or `{"error": {...}}`, sent as the daemon
-sends it (`{"id": N, "result": ...}` / `{"id": N, "error": ...}`). A method
-with no reply configured is answered with a `-32601` error so the client
-under test fails loudly instead of hanging. `fake.requests` holds every
+sends it (`{"id": N, "result": ...}` / `{"id": N, "error": ...}`); `None`
+leaves the request unanswered. A method with no reply configured is answered
+with a `-32601` error so the client under test fails loudly instead of hanging. `fake.requests` holds every
 request message received, `fake.notifications` every client notification
 (`initialized` included), `fake.connections` every accepted connection
 (`conn.frames` has the raw frames, pongs included).
@@ -55,17 +55,18 @@ class Fixture:
                 reply = {"result": m["result"]} if "result" in m else {"error": m["error"]}
                 self.replies.setdefault(methods_by_id[m["id"]], []).append(reply)
 
-    def _reply(self, request_id: int) -> dict:
-        for m in self.messages:
-            if m.get("id") == request_id and "method" not in m:
-                return m
-        raise KeyError(f"no reply with id {request_id} in the fixture")
+    def replies_to(self, request_id: int) -> list[dict]:
+        """Every daemon reply with that id; more than one when a capture spans two connections."""
+        found = [m for m in self.messages if m.get("id") == request_id and "method" not in m]
+        if not found:
+            raise KeyError(f"no reply with id {request_id} in the fixture")
+        return found
 
-    def result(self, request_id: int):
-        return self._reply(request_id)["result"]
+    def result(self, request_id: int, occurrence: int = 0):
+        return self.replies_to(request_id)[occurrence]["result"]
 
-    def error(self, request_id: int) -> dict:
-        return self._reply(request_id)["error"]
+    def error(self, request_id: int, occurrence: int = 0) -> dict:
+        return self.replies_to(request_id)[occurrence]["error"]
 
     def notifications(self, method: str) -> list[dict]:
         return [m["params"] for m in self.messages if m.get("method") == method and "id" not in m]
@@ -216,7 +217,8 @@ class FakeDaemon:
         self.requests.append(message)
         self._wake_waiters(self.requests, message)
         reply = self._reply_for(message["method"], message.get("params"))
-        await conn.send_json({"id": message["id"], **reply})
+        if reply is not None:
+            await conn.send_json({"id": message["id"], **reply})
 
     def _reply_for(self, method: str, params) -> dict:
         spec = self.replies.get(method)

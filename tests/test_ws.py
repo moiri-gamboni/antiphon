@@ -107,6 +107,7 @@ def test_close_frame_raises_transport_closed_with_the_reason(tmp_path):
         await fake.conn.send_frame(ws.OP_CLOSE, b"\x03\xe9going away")
         with pytest.raises(ws.TransportClosed) as info:
             await sock.recv_text()
+        await sock.close()
         return info.value
 
     error = run(with_fake(tmp_path, body))
@@ -122,6 +123,7 @@ def test_eof_raises_transport_closed(tmp_path):
         await fake.drop()
         with pytest.raises(ws.TransportClosed) as info:
             await sock.recv_text()
+        await sock.close()
         return first, info.value
 
     first, error = run(with_fake(tmp_path, body))
