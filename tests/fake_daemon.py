@@ -9,7 +9,7 @@ notification, send a server request, or drop the connection.
 
     fake = FakeDaemon(tmp_path / "daemon.sock")
     fake.replies["thread/start"] = {"result": fixture.result(2)}
-    fake.replies["turn/start"] = lambda params: {"error": {"code": -32600, "message": "thread not found"}}
+    fake.replies["turn/start"] = lambda params: {"error": {"code": -32600, "message": "..."}}
     await fake.start()
     ...
     await fake.notify("turn/completed", params)
@@ -20,15 +20,19 @@ notification, send a server request, or drop the connection.
 
 A reply dict is `{"result": ...}` or `{"error": {...}}`, sent as the daemon
 sends it (`{"id": N, "result": ...}` / `{"id": N, "error": ...}`); `None`
-leaves the request unanswered. A method with no reply configured is answered
-with a `-32601` error so the client under test fails loudly instead of hanging. `fake.requests` holds every
-request message received, `fake.notifications` every client notification
+leaves the request unanswered. A list is served in order, its last entry
+repeating, without being consumed (a fixture's lists can be shared). A method
+with no reply configured is answered with a `-32601` error so the client under
+test fails loudly instead of hanging. `fake.requests` holds every request
+message received, `fake.notifications` every client notification
 (`initialized` included), `fake.connections` every accepted connection
-(`conn.frames` has the raw frames, pongs included).
+(`conn.frames` has the raw frames, pongs included; `conn.stop_reading()` +
+`conn.abort()` end it with a reset instead of an EOF).
 
 `load_fixture(name)` parses a capture from `tests/fixtures/`: `.result(id)` /
-`.error(id)` return a daemon line by request id, `.replies` maps each method
-in a capture with `sent` lines to its replies in order, `.notifications(method)`
+`.error(id)` return a daemon line by request id (`occurrence=` picks a later
+one when a capture spans two connections), `.replies` maps each method in a
+capture with `sent` lines to its replies in order, `.notifications(method)`
 returns the params of every notification with that method, and
 `.server_requests(method)` every server request with that method.
 """
@@ -120,6 +124,14 @@ class Connection:
         self.writer.close()
         await self.writer.wait_closed()
 
+    def stop_reading(self) -> None:
+        """Leave whatever the client sends next unread in the kernel buffer."""
+        self.writer.transport.pause_reading()
+
+    def abort(self) -> None:
+        """Close at once; with unread data pending the client sees a reset, not an EOF."""
+        self.writer.transport.abort()
+
 
 class FakeDaemon:
     def __init__(self, socket_path):
@@ -131,6 +143,7 @@ class FakeDaemon:
         self.connections: list[Connection] = []
         self._next_request_id = 0
         self._server = None
+        self._served: dict[str, int] = {}
         self._waiters: list[tuple[list, str, asyncio.Future]] = []
 
     @property
@@ -220,14 +233,15 @@ class FakeDaemon:
         if reply is not None:
             await conn.send_json({"id": message["id"], **reply})
 
-    def _reply_for(self, method: str, params) -> dict:
+    def _reply_for(self, method: str, params) -> dict | None:
         spec = self.replies.get(method)
         if spec is None:
             return {"error": {"code": -32601, "message": f"fake daemon: no reply configured for {method}"}}
         if isinstance(spec, list):
-            reply = spec.pop(0) if len(spec) > 1 else spec[0]
-        elif callable(spec):
-            reply = spec(params)
-        else:
-            reply = spec
-        return reply
+            # Counted rather than popped, so a fixture's reply lists survive reuse across tests.
+            served = self._served.get(method, 0)
+            self._served[method] = served + 1
+            return spec[min(served, len(spec) - 1)]
+        if callable(spec):
+            return spec(params)
+        return spec

@@ -130,3 +130,18 @@ def test_eof_raises_transport_closed(tmp_path):
     assert first == '{"method":"thread/started"}'
     assert "closed" in error.reason
     assert error.last_bytes.endswith(b'{"method":"thread/started"}')
+
+
+def test_connection_reset_raises_transport_closed(tmp_path):
+    async def body(fake):
+        sock = await ws.UnixWebSocket.connect(fake.socket_path)
+        # Data left unread on the server side makes its close a reset rather than an EOF.
+        fake.conn.stop_reading()
+        await sock.send_text("x" * 100_000)
+        await asyncio.sleep(0.05)
+        fake.conn.abort()
+        with pytest.raises(ws.TransportClosed):
+            await sock.recv_text()
+        await sock.close()
+
+    run(with_fake(tmp_path, body))

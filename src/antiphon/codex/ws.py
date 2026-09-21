@@ -91,6 +91,10 @@ class UnixWebSocket:
                 opcode, payload = await read_frame(self._reader)
             except asyncio.IncompleteReadError as e:
                 raise TransportClosed("connection closed by the peer", self._last_bytes + e.partial) from e
+            except ConnectionError as e:
+                # A daemon dying with our data unread resets the socket instead of
+                # closing it; for the caller it is the same event.
+                raise TransportClosed(f"connection reset by the peer: {e}", self._last_bytes) from e
             self._last_bytes = (self._last_bytes + payload)[-512:]
             if opcode == OP_TEXT:
                 return payload.decode()
@@ -110,7 +114,7 @@ class UnixWebSocket:
         # The peer may already be gone; what matters is that our side is released.
         try:
             await self._writer.wait_closed()
-        except (ConnectionError, OSError):
+        except OSError:
             pass
 
 

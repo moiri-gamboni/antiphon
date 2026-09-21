@@ -3,8 +3,10 @@
 One `Daemon` is one connection to the control socket. Its reader task
 classifies every incoming message: `id` + `method` is a request from the
 daemon (an approval to answer), `method` alone is a notification, `id` alone is
-the reply to one of our requests. Handlers are awaited in arrival order so the
-bridge sees the daemon's events in the order the daemon emitted them.
+the reply to one of our requests. Requests and notifications are handed to a
+second task that awaits the handlers one at a time in arrival order, so the
+bridge sees the daemon's events in the order the daemon emitted them and a
+handler may itself call `request()` while the reader keeps resolving replies.
 """
 import asyncio
 import importlib.metadata
@@ -24,7 +26,7 @@ log = logging.getLogger("antiphon.codex")
 HEADLESS_INSTRUCTIONS = """\
 This thread runs headless: no human is watching a terminal for it. It was started by another session over antiphon, and that session reads your final answer when the turn ends.
 
-Sandbox escalations (writes outside the workspace, network access, commands the sandbox blocks) are reviewed automatically. When the automatic reviewer refuses one, the refusal is reported to the session that started this thread, which can approve it; state plainly what was refused and why you need it, then continue with what you can do.
+Sandbox escalations (writes outside the workspace, network access, commands the sandbox blocks) are reviewed outside this thread. When one is refused, the refusal reaches the session that started this thread, which can approve it; state plainly what was refused and why you need it, then continue with what you can do.
 
 To ask that session something, run: antiphon send <name> -- <question>
 
@@ -105,26 +107,32 @@ class Daemon:
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
         self._first_turn_effort: dict[str, str] = {}
+        self._inbox: asyncio.Queue = asyncio.Queue()
         self.epoch = next(Daemon._epochs)
         self.codex_version: str | None = None
         self.closed = asyncio.Event()
         self.close_reason: ws.TransportClosed | None = None
-        self._reader = asyncio.create_task(self._read_loop())
+        self._reader = asyncio.create_task(self._read_loop(), name="antiphon-codex-reader")
+        self._dispatcher = asyncio.create_task(self._dispatch_loop(), name="antiphon-codex-dispatch")
 
     @classmethod
     async def connect(cls, socket_path: str, on_notification, on_server_request, rawlog=None) -> "Daemon":
         sock = await ws.UnixWebSocket.connect(socket_path)
         d = cls(sock, on_notification, on_server_request, rawlog)
-        result = await d.request(
-            "initialize",
-            {
-                "clientInfo": {"name": "antiphon", "version": importlib.metadata.version("antiphon")},
-                "capabilities": {"experimentalApi": True, "optOutNotificationMethods": OPT_OUT_NOTIFICATIONS},
-            },
-        )
-        # userAgent reads "<originator>/<codex version> (<os>) ..." in every capture.
-        d.codex_version = result["userAgent"].split("/", 1)[1].split(" ", 1)[0]
-        await d._send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        try:
+            result = await d.request(
+                "initialize",
+                {
+                    "clientInfo": {"name": "antiphon", "version": importlib.metadata.version("antiphon")},
+                    "capabilities": {"experimentalApi": True, "optOutNotificationMethods": OPT_OUT_NOTIFICATIONS},
+                },
+            )
+            # userAgent reads "<originator>/<codex version> (<os>) ..." in every capture.
+            d.codex_version = result["userAgent"].split("/", 1)[1].split(" ", 1)[0]
+            await d._send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        except BaseException:
+            await d.close()
+            raise
         return d
 
     async def request(self, method: str, params, timeout: float = 30) -> dict:
@@ -145,6 +153,7 @@ class Daemon:
 
     async def close(self) -> None:
         self._reader.cancel()
+        self._dispatcher.cancel()
         await self._sock.close()
         self.closed.set()
 
@@ -232,20 +241,31 @@ class Daemon:
         await self._sock.send_text(text)
 
     async def _read_loop(self) -> None:
+        reason = None
+        text = None
         try:
             while True:
                 text = await self._sock.recv_text()
                 if self._rawlog:
                     self._rawlog.log("in", "codex", text)
-                await self._dispatch(text)
+                self._route(text)
         except ws.TransportClosed as e:
-            self.close_reason = e
+            reason = e
+        except Exception as e:
+            # Whatever stops the reader (a frame that is not JSON, a failed pong)
+            # ends the connection the same way a dropped socket does, so the
+            # callers waiting on replies and the bridge's reconnect both hear it.
+            log.exception("reader stopped; last frame: %s", text)
+            reason = ws.TransportClosed(f"reader stopped: {e!r}")
+        finally:
+            self.close_reason = reason or ws.TransportClosed("connection closed")
             for future in self._pending.values():
                 if not future.done():
-                    future.set_exception(e)
+                    future.set_exception(self.close_reason)
+            self._inbox.put_nowait(None)
             self.closed.set()
 
-    async def _dispatch(self, text: str) -> None:
+    def _route(self, text: str) -> None:
         message = json.loads(text)
         has_id, has_method = "id" in message, "method" in message
         if has_id and not has_method:
@@ -254,19 +274,23 @@ class Daemon:
                 log.warning("reply to an unknown request id: %s", text)
             else:
                 future.set_result(message)
-            return
-        if not has_method:
+        elif has_method:
+            self._inbox.put_nowait((text, message))
+        else:
             log.warning("message with neither id nor method: %s", text)
-            return
-        # A handler that raises must not take the reader down with it: every
-        # later notification would be lost and the bridge would sit deaf.
-        try:
-            if has_id:
-                await self._on_server_request(message["id"], message["method"], message.get("params"))
-            else:
-                await self._on_notification(message["method"], message.get("params"))
-        except Exception:
-            log.exception("handler raised on %s", text)
+
+    async def _dispatch_loop(self) -> None:
+        while (item := await self._inbox.get()) is not None:
+            text, message = item
+            # A handler that raises must not take the dispatcher down with it:
+            # every later notification would be lost and the bridge would sit deaf.
+            try:
+                if "id" in message:
+                    await self._on_server_request(message["id"], message["method"], message.get("params"))
+                else:
+                    await self._on_notification(message["method"], message.get("params"))
+            except Exception:
+                log.exception("handler raised on %s", text)
 
 
 async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | None) -> Delivery:
@@ -301,6 +325,8 @@ async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | N
         elif _is_turn_active(e):
             d.note("codex.deliver", {"rung": "turn-active", "threadId": thread_id, "error": e.error})
             turn_id = await d.active_turn(thread_id)
+            if turn_id is None:
+                raise
             result = await d.turn_steer(thread_id, turn_id, text, client_id)
             return Delivery("steered", result["turnId"], client_id)
         else:
@@ -309,8 +335,9 @@ async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | N
 
 
 def _is_not_loaded(e: DaemonError) -> bool:
-    # "thread not loaded: <id>" (thread/turns/list) and "thread not found: <id>"
-    # (turn/start) are the daemon's words for a thread it has not loaded.
+    # Captured wordings: "thread not loaded: <id>" from thread/turns/list on an
+    # unknown id, and "thread not found: <id>" from turn/start on an unloaded
+    # sub-agent thread; whether a top-level thread gets the same text is unobserved.
     message = e.error.get("message", "")
     return message.startswith("thread not loaded") or message.startswith("thread not found")
 

@@ -24,6 +24,15 @@ def run(coro):
     return asyncio.run(coro)
 
 
+async def until(condition, timeout: float = 2):
+    """Poll a callable until it is truthy; a test that never gets there fails, not hangs."""
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
 class Harness:
     """A fake daemon plus a connected client, with every callback recorded."""
 
@@ -154,8 +163,7 @@ def test_notifications_reach_the_handler_with_method_and_params(tmp_path):
     async def body():
         async with Harness(tmp_path) as h:
             await h.fake.notify("turn/completed", turn_completed)
-            while not h.notifications:
-                await asyncio.sleep(0.01)
+            await until(lambda: h.notifications)
             return h.notifications
 
     assert run(body()) == [("turn/completed", turn_completed)]
@@ -167,8 +175,7 @@ def test_a_message_with_id_and_method_is_a_server_request_and_respond_answers_it
     async def body():
         async with Harness(tmp_path) as h:
             request_id = await h.fake.server_request(request["method"], request["params"])
-            while not h.server_requests:
-                await asyncio.sleep(0.01)
+            await until(lambda: h.server_requests)
             await h.daemon.respond(request_id, {"decision": "accept"})
             answer = await h.fake.response(request_id)
             return h.server_requests, h.notifications, answer, h.fake.conn.frames[-1][1]
@@ -199,8 +206,7 @@ def test_a_raising_notification_handler_is_logged_with_the_raw_frame_and_the_rea
         with caplog.at_level(logging.ERROR, logger="antiphon.codex"):
             await fake.notify("turn/started", started)
             await fake.notify("turn/completed", completed)
-            while not seen:
-                await asyncio.sleep(0.01)
+            await until(lambda: seen)
         await d.close()
         await fake.stop()
 
@@ -218,12 +224,83 @@ def test_dropped_connection_fails_pending_requests_and_marks_the_daemon_closed(t
             await h.fake.wait_request("thread/read")
             await h.fake.drop()
             with pytest.raises(TransportClosed):
-                await pending
+                await asyncio.wait_for(pending, 2)
             await asyncio.wait_for(h.daemon.closed.wait(), 1)
             return h.daemon.close_reason
 
     reason = run(body())
     assert isinstance(reason, TransportClosed)
+
+
+def test_a_malformed_frame_from_the_daemon_ends_the_connection_loudly(tmp_path, caplog):
+    async def body():
+        async with Harness(tmp_path) as h:
+            h.fake.replies["thread/read"] = lambda params: None
+            pending = asyncio.ensure_future(h.daemon.request("thread/read", {"threadId": "x"}))
+            await h.fake.wait_request("thread/read")
+            with caplog.at_level(logging.ERROR, logger="antiphon.codex"):
+                await h.fake.conn.send_frame(0x1, b"not json")
+                with pytest.raises(TransportClosed) as info:
+                    await asyncio.wait_for(pending, 2)
+                await asyncio.wait_for(h.daemon.closed.wait(), 1)
+            return info.value
+
+    error = run(body())
+    assert "reader stopped" in error.reason
+    assert any("not json" in r.getMessage() for r in caplog.records)
+
+
+def test_a_handler_can_make_requests_and_get_their_replies(tmp_path):
+    read_results = []
+
+    class Bridge(Harness):
+        async def on_notification(self, method, params):
+            read_results.append(await self.daemon.thread_read(params["threadId"]))
+
+    async def body():
+        async with Bridge(tmp_path) as h:
+            h.fake.replies["thread/read"] = {"result": SUB_AGENT.result(2, occurrence=1)}
+            await h.fake.notify("thread/status/changed", {"threadId": "t1", "status": {"type": "idle"}})
+            await asyncio.wait_for(h.fake.wait_request("thread/read"), 1)
+            await until(lambda: read_results)
+
+    run(body())
+    assert read_results[0]["thread"]["agentNickname"] == "Bernoulli"
+
+
+def test_notifications_are_handled_in_arrival_order_even_when_a_handler_waits(tmp_path):
+    order = []
+
+    class Bridge(Harness):
+        async def on_notification(self, method, params):
+            if method == "turn/started":
+                await asyncio.sleep(0.05)
+            order.append(method)
+
+    async def body():
+        async with Bridge(tmp_path) as h:
+            await h.fake.notify("turn/started", {})
+            await h.fake.notify("turn/completed", {})
+            await until(lambda: len(order) == 2)
+
+    run(body())
+    assert order == ["turn/started", "turn/completed"]
+
+
+def test_a_failed_initialize_raises_and_releases_the_connection(tmp_path):
+    async def body():
+        fake = FakeDaemon(tmp_path / "daemon.sock")
+        fake.replies["initialize"] = {"error": {"code": -32600, "message": "unsupported client"}}
+        await fake.start()
+        try:
+            with pytest.raises(DaemonError):
+                await Daemon.connect(fake.socket_path, None, None)
+            await asyncio.wait_for(fake.conn.closed.wait(), 1)
+            return [t for t in asyncio.all_tasks() if t.get_name().startswith("antiphon")]
+        finally:
+            await fake.stop()
+
+    assert run(body()) == []
 
 
 # --- thread verbs -------------------------------------------------------------
@@ -528,7 +605,12 @@ def test_ensure_running_leaves_a_listening_daemon_alone(tmp_path, monkeypatch):
         (tmp_path / "app-server-control").mkdir()
         await fake.start()
         try:
-            return await asyncio.to_thread(ensure_running, str(tmp_path))
+            result = await asyncio.to_thread(ensure_running, str(tmp_path))
+            # Let the fake finish accepting and releasing the probe connection
+            # before the server goes away, or that socket leaks a warning.
+            await until(lambda: fake.connections)
+            await asyncio.wait_for(fake.conn.closed.wait(), 1)
+            return result
         finally:
             await fake.stop()
 
