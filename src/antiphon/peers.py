@@ -15,7 +15,6 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from antiphon import callers
 from antiphon.callers import Caller
 from antiphon.claude import registry
 from antiphon.codex.daemon import DaemonError
@@ -75,8 +74,6 @@ class CodexSide:
         return await self._labelled_send(own, thread.name, to_sock, args["text"])
 
     async def op_notify(self, args: dict, caller: Caller) -> dict:
-        if caller.kind == "claude":
-            raise IpcError("usage", "a Claude Code session is told when a peer goes idle by SendMessage with notify_when_idle")
         if caller.kind != "codex":
             raise IpcError("usage", "notify runs inside a Codex thread; there is no session here to notify")
         own = self._own_thread(caller)
@@ -94,9 +91,6 @@ class CodexSide:
             thread = self._own_thread(caller)
         else:
             raise IpcError("usage", "name needs a target: antiphon name <thread> <new>")
-        spawner = None if thread.thread_id == caller.codex_thread else thread.spawner
-        if not callers.permits(caller, "name", spawner):
-            raise IpcError("forbidden", callers.forbidden_message(caller, "name", spawner))
         former = thread.name
         return {**await self.bridge.op_name({**args, "target": thread.thread_id}, caller), "former": former}
 

@@ -42,7 +42,7 @@ PINNED_METHODS = ("thread/loaded/list", "turn/steer", "thread/resume")
 METHOD_NOT_FOUND = -32601
 # Ops that act on one thread, gated by who spawned it.
 # `send` is absent: every caller may send, and its target may be a Claude session rather than a thread.
-OWNED_OPS = frozenset({"interrupt", "stop", "name", "approve", "deny", "wait", "status"})
+OWNED_OPS = frozenset({"interrupt", "stop", "name", "approve", "deny"})
 WAIT_DEFAULT_TIMEOUT = 600.0
 DAEMON_WAIT = 3.0
 REGISTER_TIMEOUT = 10.0
@@ -336,7 +336,7 @@ class Bridge:
     def _check_ownership(self, op: str, args: dict, caller: Caller) -> None:
         """The ownership rule: a caller drives, stops and approves what it spawned; a
         Claude session or a human may do so to any thread."""
-        if op not in OWNED_OPS or (op in ("status", "name") and not args.get("target")):
+        if op not in OWNED_OPS or (op == "name" and not args.get("target")):
             return
         if op in ("approve", "deny"):
             thread, _ = self.approvals.find(args["token"])
