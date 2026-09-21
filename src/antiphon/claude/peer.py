@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import time
 import uuid
@@ -291,7 +292,17 @@ class Peer:
 async def run() -> int:
     peer = Peer()
     stdin = asyncio.StreamReader(limit=FRAME_LIMIT)
-    await asyncio.get_running_loop().connect_read_pipe(lambda: asyncio.StreamReaderProtocol(stdin), sys.stdin)
+    loop = asyncio.get_running_loop()
+    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(stdin), sys.stdin)
+
+    def _stop(name: str) -> None:
+        log.info("signal %s, shutting down", name)
+        stdin.feed_eof()
+
+    # A systemd/launchd stop signals the whole process group; treat it like the bridge
+    # closing our stdin, so shutdown() still tells subscribers and removes our files.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        loop.add_signal_handler(sig, _stop, sig.name)
     code = 0
     try:
         async for raw in stdin:

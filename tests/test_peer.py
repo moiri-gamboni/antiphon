@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -339,6 +340,19 @@ def test_stdin_eof_notifies_subscribers_and_removes_record_and_socket(child, cla
     child.proc.stdin.close()
     [notice] = claude.wait_for_frames(1, timeout=1.0)
     assert notice["action"] == "peer_idle_notice"
+    assert notice["state"] == "exited"
+    assert notice["orig_msg_id"] == CAPTURED_NOTIFY["msg_id"]
+    assert wait_until(lambda: not child.record_path.exists() and not os.path.exists(child.sock), timeout=1.0)
+    assert child.proc.wait(timeout=1.0) == 0
+
+
+def test_sigterm_notifies_subscribers_and_cleans_up_like_eof(child, claude):
+    child.register()
+    claude.replay(CAPTURED_NOTIFY, child.sock)
+    assert child.event()["ev"] == "subscribed"
+
+    child.proc.send_signal(signal.SIGTERM)
+    [notice] = claude.wait_for_frames(1, timeout=1.0)
     assert notice["state"] == "exited"
     assert notice["orig_msg_id"] == CAPTURED_NOTIFY["msg_id"]
     assert wait_until(lambda: not child.record_path.exists() and not os.path.exists(child.sock), timeout=1.0)
