@@ -891,8 +891,7 @@ class Bridge:
             thread_id = result["thread"]["id"]
             thread = ThreadState(
                 thread_id=thread_id, name=name, cwd=cwd, origin="spawned", spawner=caller.owner_id,
-                read_only=args["read_only"], report=args["report"], model=args.get("model"), effort=args.get("effort"),
-                review_by_parent=args["review_by_parent"], worktree=worktree,
+                read_only=args["read_only"], report=args["report"], effort=args.get("effort"), worktree=worktree,
             )
             self.state.threads[thread_id] = thread
             # thread/start subscribes the connection that made it.
