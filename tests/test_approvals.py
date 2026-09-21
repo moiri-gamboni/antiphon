@@ -181,16 +181,16 @@ def test_ls_and_status_show_an_unanswered_denial_with_its_age(short_tmp):
 # --- the spawner as reviewer: blocking requests ---------------------------------------
 
 
-def request_token(rig: Rig, request_id: int) -> str:
-    """The token of a blocking request: sha256 of "<connection epoch>:<request id>", first 6 hex chars."""
-    return hashlib.sha256(f"{rig.bridge.daemon.epoch}:{request_id}".encode()).hexdigest()[:6]
+def request_token(item_id: str) -> str:
+    """The token of a blocking request: sha256 of its item id, first 6 hex chars."""
+    return hashlib.sha256(item_id.encode()).hexdigest()[:6]
 
 
 async def blocked(rig: Rig, params: dict = REQUEST["params"]) -> tuple[int, str]:
     """A blocking request for the rig's thread; the request id and the token it got."""
     request_id = await rig.fake.server_request("item/commandExecution/requestApproval", for_thread(params))
     await until(lambda: rig.bridge.state.threads[THREAD_ID].pending)
-    return request_id, request_token(rig, request_id)
+    return request_id, request_token(params["itemId"])
 
 
 async def answered(rig: Rig, request_id: int, timeout: float = 0.3) -> dict | None:
@@ -221,6 +221,32 @@ def test_a_blocking_request_creates_a_pending_record_and_a_blocked_message(short
         f"The turn is blocked until you answer. Reply with: antiphon approve {token}   or   antiphon deny {token} -- <why>"
     ]
     assert answer is None
+
+
+def test_a_blocking_requests_token_is_derived_from_its_item_id(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(review_by_parent=True)
+            await blocked(rig)
+            return rig.bridge.state.threads[THREAD_ID].pending[0]["token"]
+
+    token = run(body())
+    assert token == hashlib.sha256(REQUEST["params"]["itemId"].encode()).hexdigest()[:6]
+
+
+def test_a_lost_request_record_is_dropped_not_kept_resolved(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(review_by_parent=True, report=False)
+            request_id, token = await blocked(rig)
+            await rig.frames(1, timeout=5.0)
+            old_epoch = rig.bridge.daemon.epoch
+            await rig.fake.drop()
+            await until(lambda: rig.bridge.daemon is not None and rig.bridge.daemon.epoch != old_epoch)
+            await until(lambda: not rig.bridge.state.threads[THREAD_ID].pending)
+            return rig.bridge.state.threads[THREAD_ID].pending
+
+    assert run(body()) == []
 
 
 def test_approve_on_a_blocking_request_answers_accept_on_the_right_id(short_tmp):
@@ -322,7 +348,7 @@ def test_a_request_from_a_dropped_connection_is_retired_at_the_reconnect_interru
             old_epoch = rig.bridge.daemon.epoch
             await rig.fake.drop()
             await until(lambda: rig.bridge.daemon is not None and rig.bridge.daemon.epoch != old_epoch)
-            await until(lambda: rig.bridge.state.threads[THREAD_ID].pending[0]["resolved"])
+            await until(lambda: not rig.bridge.state.threads[THREAD_ID].pending)
             frames = await rig.frames(2, timeout=5.0)
             with pytest.raises(ipc.IpcError) as err:
                 await rig.bridge.dispatch("approve", {"token": token}, rig.caller)
@@ -333,7 +359,7 @@ def test_a_request_from_a_dropped_connection_is_retired_at_the_reconnect_interru
     assert [i["params"] for i in interrupts] == [{"threadId": THREAD_ID, "turnId": REQUEST["params"]["turnId"]}]
     assert len(texts) == 2
     assert f"(token {token})" in texts[1] and "lost" in texts[1] and "interrupted" in texts[1]
-    assert err.kind == "precondition" and "already resolved" in err.message
+    assert err.kind == "unknown_target"  # the lost record is dropped, so its token is gone
     assert answer is None
     assert not statuses[0].startswith("approval")
 
@@ -355,9 +381,9 @@ def test_lost_survives_a_transport_error_during_its_interrupt(short_tmp):
             # _lost is best-effort; a transport failure interrupting the lost turn must not
             # escape (it would end the reconcile loop that calls the sweep).
             await rig.bridge.approvals._lost(thread, record, rig.bridge.daemon)
-            return rig.bridge.state.threads[THREAD_ID].pending[0]["resolved"]
+            return rig.bridge.state.threads[THREAD_ID].pending
 
-    assert run(body()) is True
+    assert run(body()) == []  # completed without raising, and dropped the lost record
 
 
 def test_a_lost_request_whose_turn_already_ended_interrupts_nothing(short_tmp):
@@ -392,7 +418,7 @@ def test_a_bridge_restart_makes_every_persisted_request_stale(short_tmp):
             rig.bridge = restarted
             before = restarted.approvals.labels(restarted.state.threads[THREAD_ID])
             await restarted.start()
-            await until(lambda: restarted.state.threads[THREAD_ID].pending[0]["resolved"])
+            await until(lambda: not restarted.state.threads[THREAD_ID].pending)
             frames = await rig.frames(2, timeout=5.0)
             return token, before, message_texts(frames), rig.fake.received("turn/interrupt")
 

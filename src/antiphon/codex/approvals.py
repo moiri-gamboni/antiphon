@@ -211,7 +211,9 @@ class Approvals:
             await self.bridge.refuse_server_request(request_id, method, params)
             return
         record = Pending(
-            token=token_for(f"{self.bridge.daemon.epoch}:{request_id}"), thread_id=thread.thread_id,
+            # The item id is unique for the life of the item, so it survives a daemon and
+            # bridge restart; the epoch:id fallback is only for a request that carries none.
+            token=token_for(params.get("itemId") or f"{self.bridge.daemon.epoch}:{request_id}"), thread_id=thread.thread_id,
             turn_id=params["turnId"], command=params["command"], cwd=params["cwd"],
             rationale=params["reason"], risk_level=None, review_completed_params=None,
             since=self.clock(), resolved=False, kind="request", request_id=request_id, epoch=self.bridge.daemon.epoch,
@@ -310,8 +312,9 @@ class Approvals:
     async def _lost(self, thread: ThreadState, record: Pending, d: Daemon) -> None:
         """A request from a connection that is gone cannot be answered on this one. What
         the daemon did with it is not captured, so a turn still waiting on it is ended
-        rather than left blocked forever, and the spawner is told either way."""
-        self._resolve(thread, record)
+        rather than left blocked forever, and the spawner is told either way. The record is
+        dropped, not kept resolved: nothing about a lost request can be answered later."""
+        self._store(thread, [p for p in self.pending(thread) if p.token != record.token])
         interrupted = False
         if thread.active_turn_id == record.turn_id:
             try:
