@@ -46,7 +46,8 @@ class Child:
             bufsize=1,
         )
         self.events: queue.Queue[dict] = queue.Queue()
-        threading.Thread(target=self._pump, daemon=True).start()
+        self.pump = threading.Thread(target=self._pump, daemon=True)
+        self.pump.start()
 
     def _pump(self) -> None:
         for line in self.proc.stdout:
@@ -84,6 +85,10 @@ class Child:
         if self.proc.poll() is None:
             self.proc.kill()
         self.proc.wait()
+        # The pump thread leaves the read loop at EOF; only then is stdout safe to close.
+        self.pump.join(timeout=2.0)
+        self.proc.stdin.close()
+        self.proc.stdout.close()
 
 
 @pytest.fixture

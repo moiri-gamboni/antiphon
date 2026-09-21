@@ -111,6 +111,12 @@ capture_daemon.py --listen 3 thread/read '{"threadId":"<child>"}' thread/resume 
 
 What it pins: `thread/read` of a sub-agent works while it is unloaded and returns `parentThreadId`, `agentNickname` (auto-generated, "Bernoulli"), `agentRole: null`, `canAcceptDirectInput: null`, and a `source` that is an **object**, `{"subAgent": {"thread_spawn": {"parent_thread_id", "depth", "agent_path", "agent_nickname", "agent_role"}}}`, where top-level threads have the string `"vscode"`; a parser must accept both. `thread/resume` on an unloaded sub-agent fails with `-32600 cannot resume an unloaded multi-agent v2 sub-agent through its parent; resume the parent first, or use thread/read to inspect it`, and `turn/start` on it fails with `-32600 thread not found`. The refusal of direct input on a *loaded* sub-agent (`-32600 direct app-server input is not allowed for multi-agent v2 sub-agents`) was observed in the first spike but is not in any committed capture.
 
+### `turns-list.jsonl`
+
+Read-only calls, no model turn: `thread/loaded/list` (empty) then `thread/turns/list {threadId, limit: 1, sortDirection: "desc"}` on the thread of `guardian-override.jsonl` while it was unloaded, and on an unknown id.
+
+What it pins: `thread/turns/list` answers from the rollout even for a thread the daemon has not loaded (one completed turn, a `backwardsCursor`), and an unknown id fails with `-32600 thread not loaded: <id>`. This is how the client finds a thread's active turn before steering.
+
 ### `codex-agent-tools.jsonl`, `codex-agent-tools.txt`
 
 A thread with multi-agent enabled asked to list its tools verbatim; the `.txt` is the model's listing (`name: description`, one per line). The multi-agent tools are `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, `list_agents`, all scoped to the thread's own agent tree. No tool addresses another top-level thread, so a Codex-side `send` to another Codex thread is not a duplicate of a native tool.
