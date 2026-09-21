@@ -63,6 +63,9 @@ class CodexSide:
         if record is not None:
             return await self._labelled_send(self._own_thread(caller), record.name, record.socket_path, args["text"])
         thread = self.bridge.resolve(target)
+        # Send is ungated, but a Codex caller reaches a thread it did not spawn only as a
+        # labelled peer message; a thread it spawned it drives directly. This spawner test is
+        # the ownership rule (callers.permits) for the Codex case, used here to route, not gate.
         if thread.spawner == caller.owner_id:
             return await self.bridge.op_send(args, caller)
         own = self._own_thread(caller)
