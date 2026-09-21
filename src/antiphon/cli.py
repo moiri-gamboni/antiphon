@@ -223,6 +223,18 @@ def verb_name(args, client: Client) -> int:
     return 0
 
 
+def verb_approve(args, client: Client) -> int:
+    result = client.call("approve", {"token": args.token})
+    print(f"approved {result['token']} on {result['name']}: {result['command']}")
+    return 0
+
+
+def verb_deny(args, client: Client) -> int:
+    result = client.call("deny", {"token": args.token, "why": " ".join(args.why)})
+    print(f"denied {result['token']} on {result['name']}: {result['command']}")
+    return 0
+
+
 VERBS = {
     "ping": verb_ping,
     "start": verb_start,
@@ -234,6 +246,8 @@ VERBS = {
     "stop": verb_stop,
     "resume": verb_resume,
     "name": verb_name,
+    "approve": verb_approve,
+    "deny": verb_deny,
 }
 
 
@@ -274,6 +288,10 @@ def build_parser() -> argparse.ArgumentParser:
     name = sub.add_parser("name", help="rename a thread")
     name.add_argument("target")
     name.add_argument("new")
+    sub.add_parser("approve", help="approve an escalation by its token (see the message or `ls`)").add_argument("token")
+    deny = sub.add_parser("deny", help="deny an escalation by its token, telling the thread why")
+    deny.add_argument("token")
+    deny.add_argument("why", nargs="+")
     return parser
 
 

@@ -27,6 +27,7 @@ from pathlib import Path
 from antiphon import callers, ipc
 from antiphon.callers import Caller
 from antiphon.claude import registry
+from antiphon.codex import approvals as approvals_mod
 from antiphon.codex import daemon as daemon_mod
 from antiphon.codex.daemon import Daemon, DaemonError, DaemonUnavailable, deliver
 from antiphon.codex.ws import TransportClosed
@@ -211,6 +212,7 @@ class Bridge:
         self._server: asyncio.AbstractServer | None = None
         self._closing = False
         self.on_server_request = self.refuse_server_request
+        self.sweeps = []  # async () -> None, run after every reconcile pass (approval reminders)
         self.ops = {
             "ping": self.op_ping,
             "start": self.op_start,
@@ -243,6 +245,7 @@ class Bridge:
             "unknown_frame": self.on_child_unknown_frame,
             "exited": self.on_child_exited,
         }
+        self.approvals = approvals_mod.install(self)
 
     # --- lifecycle ---------------------------------------------------------------
 
@@ -538,6 +541,8 @@ class Bridge:
                 log.exception("reconcile failed; the next pass starts over")
             self.last_reconcile = time.time()
             self.save()
+        for sweep in self.sweeps:
+            await sweep()
 
     async def _reconcile_with(self, d: Daemon) -> None:
         loaded = set(await d.loaded_list())
@@ -948,7 +953,7 @@ class Bridge:
         t = self.resolve(target)
         return {
             "name": t.name, "thread_id": t.thread_id, "cwd": t.cwd, "origin": t.origin, "spawner": t.spawner,
-            "status": t.status, "active_turn_id": t.active_turn_id, "pending": t.pending, "last_error": t.last_error,
+            "status": t.status, "active_turn_id": t.active_turn_id, "pending": self.approvals.labels(t), "last_error": t.last_error,
             "final": t.final, "outcome": t.outcome, "read_only": t.read_only, "child_pid": t.child_pid,
             "worktree": t.worktree,
             "sub_agents": [{"thread_id": s.thread_id, "nickname": s.nickname, "role": s.role, "status": s.status} for s in t.sub_agents.values()],
@@ -965,7 +970,7 @@ class Bridge:
                 "cwd": record.data.get("cwd"), "self": caller.kind == "claude" and record.data.get("sessionId") == caller.claude_session_id,
             })
         for thread in self.state.threads.values():
-            rows.append({"name": thread.name, "kind": "codex", "status": thread.status, "cwd": thread.cwd,
+            rows.append({"name": thread.name, "kind": "codex", "status": self.approvals.status_label(thread), "cwd": thread.cwd,
                          "self": caller.codex_thread == thread.thread_id, "thread_id": thread.thread_id})
             for sub in thread.sub_agents.values():
                 rows.append({"name": sub.nickname or sub.thread_id[:8], "kind": "codex-agent", "status": sub.status,
