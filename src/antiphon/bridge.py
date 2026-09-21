@@ -806,12 +806,18 @@ class Bridge:
             return False
         return True
 
-    async def _deliver_into(self, thread: ThreadState, text: str):
-        """Steer or start a turn on a hosted thread, resuming it first if it was unloaded."""
+    async def ensure_loaded(self, thread: ThreadState) -> Daemon:
+        """The daemon connection, with `thread` resumed first if it was unloaded."""
         d = await self._require_daemon()
         if thread.status == "unloaded":
-            await d.thread_resume(thread.thread_id)
+            result = await d.thread_resume(thread.thread_id)
             self.subscribed[thread.thread_id] = d.epoch
+            self._set_status(thread, _status_of(result["thread"]))
+        return d
+
+    async def _deliver_into(self, thread: ThreadState, text: str):
+        """Steer or start a turn on a hosted thread, resuming it first if it was unloaded."""
+        d = await self.ensure_loaded(thread)
         delivery = await deliver(d, thread.thread_id, text, self._sandbox_policy(thread))
         thread.active_turn_id = delivery.turn_id
         self._set_status(thread, "busy")

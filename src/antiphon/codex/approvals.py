@@ -11,14 +11,16 @@ tells the thread why it stays denied.
 A thread started with the spawner as reviewer instead gets blocking
 `item/commandExecution/requestApproval` server requests; those are forwarded
 the same way, answered with a decision on `approve`/`deny`, and the spawner
-is reminded once when one has waited ten minutes. Nothing is ever cancelled
-for the spawner: `deny` is the way out.
+is reminded once when one has waited ten minutes. Waiting never cancels a
+request: `deny` is the way out. Only a request whose connection to the daemon
+dropped is retired, since it can no longer be answered.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import logging
 import re
 import time
@@ -26,7 +28,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from antiphon.callers import Caller
-from antiphon.codex.daemon import DaemonError
+from antiphon.codex.daemon import Daemon, DaemonError
 from antiphon.ipc import IpcError
 from antiphon.state import ThreadState
 
@@ -80,16 +82,40 @@ def age(seconds: float) -> str:
 
 
 def _snake(name: str) -> str:
-    # The notification spells the action source in camelCase (`unifiedExec`); the
-    # override method wants the core event's snake_case (`unified_exec`).
+    # The notification spells names in camelCase (`unifiedExec`); the override method
+    # wants the core event's snake_case (`unified_exec`).
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def describe_action(action: dict) -> tuple[str, str]:
+    """One line naming what the reviewer judged, and its working directory ("" when the
+    action has none). Only the `command` shape is captured; the others follow the schema."""
+    kind = action["type"]
+    if kind == "command":
+        summary = action["command"]
+    elif kind == "execve":
+        summary = " ".join(action["argv"])
+    elif kind == "writeStdin":
+        summary = f"stdin to process {action['processId']}: {action['stdin'].rstrip()}"
+    elif kind == "applyPatch":
+        summary = ", ".join(action["files"])
+    elif kind == "networkAccess":
+        summary = f"{action['protocol']} {action['target']}"
+    elif kind == "mcpToolCall":
+        summary = f"{action['server']}/{action['toolName']}"
+    elif kind == "requestPermissions":
+        summary = action.get("reason") or json.dumps(action["permissions"])
+    else:
+        summary = json.dumps(action)
+    return summary, action.get("cwd") or ""
 
 
 def guardian_event(completed: dict) -> dict:
     """The core event the override method takes, assembled from the completed-review
-    notification as Codex's TUI assembles it; fields the TUI leaves empty are omitted."""
+    notification as Codex's TUI assembles it; fields the TUI leaves empty are omitted.
+    The `command` action is pinned by a capture; the other shapes get the same renaming."""
     review = completed["review"]
-    action = completed["action"]
+    action = {_snake(k): (_snake(v) if k in ("type", "source") else v) for k, v in completed["action"].items() if v is not None}
     event = {
         "id": completed["reviewId"],
         "turn_id": completed["turnId"],
@@ -100,7 +126,7 @@ def guardian_event(completed: dict) -> dict:
         "user_authorization": review["userAuthorization"],
         "rationale": review["rationale"],
         "decision_source": completed["decisionSource"],
-        "action": {"type": action["type"], "source": _snake(action["source"]), "command": action["command"], "cwd": action["cwd"]},
+        "action": action,
     }
     return {k: v for k, v in event.items() if v is not None}
 
@@ -164,10 +190,10 @@ class Approvals:
         if params["review"]["status"] != "denied" or thread is None or thread.origin != "spawned":
             log.info("review %s on %s: %s", params["reviewId"], params["threadId"], params["review"]["status"])
             return
-        action = params["action"]
+        command, cwd = describe_action(params["action"])
         record = Pending(
             token=token_for(params["reviewId"]), thread_id=thread.thread_id, review_id=params["reviewId"],
-            target_item_id=params["targetItemId"], turn_id=params["turnId"], command=action["command"], cwd=action["cwd"],
+            target_item_id=params["targetItemId"], turn_id=params["turnId"], command=command, cwd=cwd,
             rationale=params["review"]["rationale"], risk_level=params["review"]["riskLevel"],
             review_started_params=started, review_completed_params=params, since=self.clock(), resolved=False,
             kind="denied", request_id=None, epoch=None, available_decisions=None,
@@ -180,7 +206,8 @@ class Approvals:
     # --- the spawner as reviewer: blocking requests --------------------------------------
 
     async def on_server_request(self, request_id, method: str, params) -> None:
-        thread = self.bridge.state.threads.get(params["threadId"])
+        # A few request kinds (token refresh, attestation) name no thread at all.
+        thread = self.bridge.state.threads.get((params or {}).get("threadId"))
         if thread is not None and thread.origin == "adopted":
             # A human's TUI is the one to answer its own thread's requests.
             log.info("server request %s (id %s) on adopted thread %s left to its TUI", method, request_id, thread.name)
@@ -212,20 +239,26 @@ class Approvals:
                 log.info("approval request %s on %s was answered elsewhere", record.token, thread.name)
                 self._resolve(thread, record)
 
-    async def remind_overdue(self) -> None:
-        """One reminder to the spawner per blocked request that has waited long enough."""
+    async def sweep(self) -> None:
+        """After each reconcile pass: retire requests whose connection is gone, and remind
+        the spawner once of a request that has waited long enough."""
+        d = self.bridge.daemon
         now = self.clock()
         for thread in list(self.bridge.state.threads.values()):
             for record in self.pending(thread):
-                if record.kind != "request" or record.resolved or record.reminded or now - record.since < REMIND_AFTER:
+                if record.kind != "request" or record.resolved:
                     continue
-                record.reminded = True
-                self._update(thread, record)
-                head = f'Still waiting: the action in "{thread.name}" (token {record.token}) has been blocked for {age(now - record.since)}: {record.rationale}'
-                self._notify(thread, record, head, "The turn stays blocked until you answer.")
+                if d is not None and record.epoch != d.epoch:
+                    await self._lost(thread, record, d)
+                elif not record.reminded and now - record.since >= REMIND_AFTER:
+                    record.reminded = True
+                    self._update(thread, record)
+                    head = f'Still waiting: the action in "{thread.name}" (token {record.token}) has been blocked for {age(now - record.since)}: {record.rationale}'
+                    self._notify(thread, record, head, "The turn stays blocked until you answer.")
 
     def _notify(self, thread: ThreadState, record: Pending, head: str, tail: str) -> None:
-        text = f"{head}\n  command: {record.command}\n  cwd: {record.cwd}\n{tail} {REPLY_COMMANDS.format(token=record.token)}"
+        cwd = f"  cwd: {record.cwd}\n" if record.cwd else ""
+        text = f"{head}\n  command: {record.command}\n{cwd}{tail} {REPLY_COMMANDS.format(token=record.token)}"
         self.bridge._spawn(self.bridge.deliver_to_spawner(thread, text), "antiphon-approval-notice")
 
     # --- turn end ------------------------------------------------------------------------
@@ -243,16 +276,22 @@ class Approvals:
 
     async def op_approve(self, args: dict, caller: Caller) -> dict:
         thread, record = self._unresolved(args["token"])
-        d = await self.bridge._require_daemon()
-        if record.kind == "denied":
-            try:
-                await d.approve_guardian_denied(thread.thread_id, guardian_event(record.review_completed_params))
-            except DaemonError as e:
-                raise IpcError("daemon", f"thread/approveGuardianDeniedAction failed: {e.error.get('message')}", e.error) from e
-            self._resolve(thread, record)
-            await self._tell(thread, f"The action `{record.command}` that the reviewer denied is now approved: retry it now.")
-        else:
+        if record.kind == "request":
             await self._answer(thread, record, {"decision": "accept"})
+            return self._reply(thread, record)
+        d = await self.bridge.ensure_loaded(thread)
+        try:
+            await d.approve_guardian_denied(thread.thread_id, guardian_event(record.review_completed_params))
+        except DaemonError as e:
+            # The override's payload shape is pinned only for a captured `command` action;
+            # when the daemon refuses it, the approval still reaches the thread as an
+            # instruction the reviewer sees on the retry.
+            log.warning("override refused for %s (%s); approving by message instead: %r", record.token, thread.name, e)
+            retry = f"I approve running `{record.command}` in `{record.cwd}`: retry it now."
+        else:
+            retry = f"The action `{record.command}` that the reviewer denied is now approved: retry it now."
+        self._resolve(thread, record)
+        await self._tell(thread, retry)
         return self._reply(thread, record)
 
     async def op_deny(self, args: dict, caller: Caller) -> dict:
@@ -272,25 +311,29 @@ class Approvals:
         d = await self.bridge._require_daemon()
         if record.epoch != d.epoch:
             await self._lost(thread, record, d)
+            raise IpcError("precondition", f"approval {record.token} was lost with the Codex connection")
         await d.respond(record.request_id, result)
         self._resolve(thread, record)
 
-    async def _lost(self, thread: ThreadState, record: Pending, d) -> None:
-        """A request from a connection that is gone cannot be answered on this one; what
-        the daemon did with it is not captured, so the turn is ended rather than left
-        waiting on an answer that can never arrive."""
-        turn_id = thread.active_turn_id or record.turn_id
-        try:
-            await d.turn_interrupt(thread.thread_id, turn_id)
-        except DaemonError as e:
-            log.info("interrupt after a lost approval on %s refused (turn probably over): %r", thread.name, e)
+    async def _lost(self, thread: ThreadState, record: Pending, d: Daemon) -> None:
+        """A request from a connection that is gone cannot be answered on this one. What
+        the daemon did with it is not captured, so a turn still waiting on it is ended
+        rather than left blocked forever, and the spawner is told either way."""
         self._resolve(thread, record)
+        interrupted = False
+        if thread.active_turn_id == record.turn_id:
+            try:
+                await d.turn_interrupt(thread.thread_id, record.turn_id)
+                interrupted = True
+            except DaemonError as e:
+                log.info("interrupt after a lost approval on %s refused (turn probably over): %r", thread.name, e)
+        outcome = "the turn was interrupted" if interrupted else "that turn is over"
         text = (
             f'The approval request in "{thread.name}" (token {record.token}) for `{record.command}` was lost when the connection to Codex dropped; '
-            "the turn was interrupted. Send the thread a new instruction to try again."
+            f"{outcome}. Send the thread a new instruction to try again."
         )
+        log.warning("approval request %s on %s lost with its connection; %s", record.token, thread.name, outcome)
         self.bridge._spawn(self.bridge.deliver_to_spawner(thread, text), "antiphon-approval-notice")
-        raise IpcError("precondition", f"approval {record.token} was lost with the Codex connection; the turn was interrupted")
 
     async def _tell(self, thread: ThreadState, text: str) -> None:
         try:
@@ -306,13 +349,19 @@ class Approvals:
 def install(bridge: Bridge) -> Approvals:
     """Register the approval handlers and ops on a bridge; returns the handler object."""
     approvals = Approvals(bridge)
+    for thread in bridge.state.threads.values():
+        # A request lives on the connection it arrived on, which died with the previous
+        # bridge process; the sweep retires these once the daemon is back.
+        for record in thread.pending:
+            if record["kind"] == "request":
+                record["epoch"] = None
     bridge.ops["approve"] = approvals.op_approve
     bridge.ops["deny"] = approvals.op_deny
     bridge.on_server_request = approvals.on_server_request
     bridge.notifications["item/autoApprovalReview/started"] = approvals.on_review_started
     bridge.notifications["item/autoApprovalReview/completed"] = approvals.on_review_completed
     bridge.notifications["serverRequest/resolved"] = approvals.on_server_request_resolved
-    bridge.sweeps.append(approvals.remind_overdue)
+    bridge.sweeps.append(approvals.sweep)
     turn_completed = bridge.notifications["turn/completed"]
 
     async def on_turn_completed(params):
