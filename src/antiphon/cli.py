@@ -126,7 +126,21 @@ def verb_ping(args, client: Client) -> int:
     return 0
 
 
+MISPLACED_OPTIONS = ("--wait", "--timeout")
+
+
+def _misplaced_option(tokens: list[str]) -> str | None:
+    """A `--wait`/`--timeout` that landed in the prompt because it followed `--`; only the
+    first or last token, since a legitimate prompt may mention one in its middle."""
+    ends = {tokens[0], tokens[-1]} if tokens else set()
+    return next((token for token in MISPLACED_OPTIONS if token in ends), None)
+
+
 def verb_start(args, client: Client) -> int:
+    misplaced = _misplaced_option(args.prompt)
+    if misplaced is not None:
+        print(f'antiphon: {misplaced} goes before the --: antiphon start {misplaced} -- "<brief>"', file=sys.stderr)
+        return 2
     result = client.call("start", {
         "cwd": os.path.abspath(args.cwd), "name": args.name, "read_only": args.read_only, "model": args.model,
         "effort": args.effort, "report": not args.no_report, "worktree": args.worktree,
@@ -143,6 +157,10 @@ def verb_start(args, client: Client) -> int:
 
 
 def verb_send(args, client: Client) -> int:
+    misplaced = _misplaced_option(args.text)
+    if misplaced is not None:
+        print(f'antiphon: {misplaced} goes before the --: antiphon send {args.target} {misplaced} -- "<text>"', file=sys.stderr)
+        return 2
     return _send(client, args.target, " ".join(args.text), args.wait, args.timeout)
 
 
@@ -314,13 +332,13 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--visible", action="store_true", help="then attach a terminal to it (see attach)")
     start.add_argument("--wait", action="store_true")
     start.add_argument("--timeout", type=float)
-    start.add_argument("prompt", nargs="*")
+    start.add_argument("prompt", nargs="*", help="the first turn's prompt; put options (--wait, --timeout) before the --")
 
     send = sub.add_parser("send", help="steer a busy thread or start a turn on an idle one")
     send.add_argument("target")
     send.add_argument("--wait", action="store_true")
     send.add_argument("--timeout", type=float)
-    send.add_argument("text", nargs="+")
+    send.add_argument("text", nargs="+", help="the message; put options (--wait, --timeout) before the --")
 
     wait = sub.add_parser("wait", help="wait for the thread's turn to end and print the outcome")
     wait.add_argument("target")

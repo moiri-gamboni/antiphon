@@ -208,6 +208,20 @@ def test_send_wait_prints_the_final_answer(rig, capsys):
     assert out.endswith("DONE\n")
 
 
+def test_start_refuses_a_wait_placed_after_the_separator(rig, capsys):
+    code, out, err = rig.run("start", "-n", "x", "-C", str(rig.tmp), "--", "the brief", "--wait", capsys=capsys)
+    assert code == 2
+    assert "--wait" in err and "antiphon start --wait --" in err
+    assert rig.daemon.received("thread/start") == []
+
+
+def test_send_refuses_a_wait_placed_after_the_separator(rig, capsys):
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    code, out, err = rig.run("send", "helper", "--", "go now", "--wait", capsys=capsys)
+    assert code == 2
+    assert "--wait" in err
+
+
 def test_a_failed_turn_exits_6_with_the_failure_text(rig, capsys):
     assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
     assert rig.run("send", "helper", "--", "go", capsys=capsys)[0] == 0
