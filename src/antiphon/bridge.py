@@ -45,6 +45,7 @@ METHOD_NOT_FOUND = -32601
 OWNED_OPS = frozenset({"interrupt", "stop", "name", "approve", "deny"})
 WAIT_DEFAULT_TIMEOUT = 600.0
 DAEMON_WAIT = 3.0
+BIND_PROBE_TIMEOUT = 2.0
 REGISTER_TIMEOUT = 10.0
 DELIVER_TIMEOUT = 10.0
 CHILD_EXIT_TIMEOUT = 3.0
@@ -255,7 +256,11 @@ class Bridge:
         """Take the control socket; a live bridge there means this one must not run."""
         if self.socket_path.exists():
             try:
-                await asyncio.to_thread(ipc.call, str(self.socket_path), "ping", {}, 2)
+                await asyncio.to_thread(ipc.call, str(self.socket_path), "ping", {}, BIND_PROBE_TIMEOUT)
+            except ipc.BridgeBusy as e:
+                # The socket accepted the connection but was slow to answer: a live bridge
+                # still making its first daemon connection, not a stale file.
+                raise AlreadyRunning(f"a bridge is already running on {self.socket_path} ({e})") from e
             except ipc.BridgeUnreachable:
                 log.info("removing stale control socket %s", self.socket_path)
                 self.socket_path.unlink()

@@ -854,6 +854,33 @@ def test_bind_unlinks_a_stale_socket_and_a_second_bridge_yields_to_a_live_one(sh
     assert "daemon" in run(body())
 
 
+def test_bind_yields_to_a_live_bridge_still_making_its_first_daemon_connection(short_tmp, monkeypatch):
+    from antiphon import bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod, "BIND_PROBE_TIMEOUT", 0.2)
+
+    async def body():
+        rig = Rig(short_tmp)
+        # Bridge A binds and serves, but the daemon is not up yet, so its ping waits
+        # for the first connection (DAEMON_WAIT) — longer than B's bind probe.
+        await rig.bridge.start()
+        try:
+            second = rig.make_bridge()
+            with pytest.raises(AlreadyRunning):
+                await second.bind()
+            still_serving = str(rig.home / "bridge.sock") == str(rig.bridge.socket_path) and rig.bridge.socket_path.exists()
+            await rig.fake.start()
+            answered = await asyncio.to_thread(ipc.call, str(rig.home / "bridge.sock"), "ping", {})
+            return still_serving, answered
+        finally:
+            await rig.bridge.close()
+            await rig.fake.stop()
+
+    still_serving, answered = run(body())
+    assert still_serving
+    assert answered["daemon"] is True
+
+
 def test_a_bridge_restart_forgets_dead_children_but_keeps_the_threads(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

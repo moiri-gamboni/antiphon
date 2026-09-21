@@ -39,6 +39,11 @@ class BridgeUnreachable(Exception):
     """No bridge answered on the socket."""
 
 
+class BridgeBusy(BridgeUnreachable):
+    """A bridge accepted the connection but did not reply in time: it is alive, just
+    slow (a fresh one still making its first daemon connection), not a stale socket."""
+
+
 def peer_pid(sock: socket.socket) -> int | None:
     """The pid of the process at the other end of a Unix socket, where the OS tells us."""
     if sys.platform.startswith("linux"):
@@ -112,12 +117,12 @@ def call_raw(path: str, op: str, args: dict, timeout: float = 30) -> dict:
             while not data.endswith(b"\n"):
                 chunk = s.recv(65536)
                 if not chunk:
-                    raise BridgeUnreachable("the bridge closed the connection without replying")
+                    raise BridgeBusy("the bridge closed the connection without replying")
                 data += chunk
         except (FileNotFoundError, ConnectionRefusedError) as e:
             raise BridgeUnreachable(f"no bridge at {path}: {e.strerror}") from e
         except TimeoutError as e:
-            raise BridgeUnreachable(f"the bridge did not reply within {timeout} s") from e
+            raise BridgeBusy(f"the bridge did not reply within {timeout} s") from e
     reply = json.loads(data)
     log.debug("ipc %s -> %s", op, reply)
     if not reply["ok"]:
