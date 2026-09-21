@@ -582,19 +582,20 @@ class Bridge:
         async with self._reconcile_lock:
             self._check_pins()
             d = self.daemon
-            if d is None:
-                return
-            try:
-                await self._reconcile_with(d)
-            except (TransportClosed, DaemonError, TimeoutError) as e:
-                # The connection went away mid-pass or the daemon refused or sat on a call;
-                # the next pass (or the reconnect) starts over from the daemon's truth.
-                log.warning("reconcile interrupted: %r", e)
-            except Exception:
-                # A reply in a shape this bridge cannot read must not stop every later pass.
-                log.exception("reconcile failed; the next pass starts over")
-            self.last_reconcile = time.time()
+            if d is not None:
+                try:
+                    await self._reconcile_with(d)
+                except (TransportClosed, DaemonError, TimeoutError) as e:
+                    # The connection went away mid-pass or the daemon refused or sat on a call;
+                    # the next pass (or the reconnect) starts over from the daemon's truth.
+                    log.warning("reconcile interrupted: %r", e)
+                except Exception:
+                    # A reply in a shape this bridge cannot read must not stop every later pass.
+                    log.exception("reconcile failed; the next pass starts over")
+                self.last_reconcile = time.time()
             self.save()
+        # The sweeps (approval reminders, retiring a lost request) run every pass, daemon or
+        # not: a blocked request's reminder must still fire during a daemon outage.
         for sweep in self.sweeps:
             await sweep()
 

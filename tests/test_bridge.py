@@ -620,6 +620,23 @@ def test_ping_reports_the_daemon_unreachable_while_it_is_down(short_tmp):
     assert up["codex"] == "0.155.1"
 
 
+def test_reconcile_runs_the_sweeps_even_while_the_daemon_is_down(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.fake.stop()
+            await until(lambda: rig.bridge.daemon is None)
+            ran = []
+
+            async def sweep():
+                ran.append(True)
+
+            rig.bridge.sweeps.append(sweep)
+            await rig.bridge.reconcile()
+            return ran
+
+    assert run(body()) == [True]
+
+
 def test_reconcile_adopts_a_loaded_thread_absent_from_state_without_subscribing(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
