@@ -39,6 +39,7 @@ log = logging.getLogger("antiphon.bridge")
 PINNED_METHODS = ("thread/loaded/list", "turn/steer", "thread/resume")
 METHOD_NOT_FOUND = -32601
 WAIT_DEFAULT_TIMEOUT = 600.0
+DAEMON_WAIT = 3.0
 IDLE_DETAIL_CHARS = 200
 
 
@@ -221,7 +222,11 @@ class Bridge:
 
     # --- daemon connection ----------------------------------------------------------
 
-    def _require_daemon(self) -> Daemon:
+    async def _require_daemon(self) -> Daemon:
+        """The live daemon connection, waiting briefly for the one a fresh bridge is still making."""
+        deadline = time.monotonic() + DAEMON_WAIT
+        while self.daemon is None and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
         if self.daemon is None:
             raise IpcError("daemon_unreachable", "the Codex daemon is not connected; the bridge is reconnecting")
         return self.daemon
@@ -286,7 +291,7 @@ class Bridge:
 
     async def refuse_server_request(self, request_id: int, method: str, params) -> None:
         log.warning("refusing server request %s (id %s): %s", method, request_id, json.dumps(params)[:500])
-        await self._require_daemon().respond_error(request_id, METHOD_NOT_FOUND, f"antiphon does not answer {method}")
+        await self.daemon.respond_error(request_id, METHOD_NOT_FOUND, f"antiphon does not answer {method}")
 
     # --- notifications ----------------------------------------------------------------
 
@@ -510,6 +515,7 @@ class Bridge:
     async def op_ping(self, args: dict, caller: Caller) -> dict:
         claude_versions = [r.data["version"] for r in self.live_records() if "version" in r.data]
         return {
+            "pid": os.getpid(),
             "daemon": self.daemon is not None,
             "codex": self.daemon.codex_version if self.daemon else None,
             "claude": claude_versions[0] if claude_versions else None,
@@ -518,7 +524,7 @@ class Bridge:
         }
 
     async def op_start(self, args: dict, caller: Caller) -> dict:
-        d = self._require_daemon()
+        d = await self._require_daemon()
         cwd = args["cwd"]
         wanted = args.get("name") or f"codex-{os.path.basename(cwd.rstrip('/'))}"
         name = registry.unique_name(wanted, self.taken_names())
@@ -571,7 +577,7 @@ class Bridge:
     async def op_send(self, args: dict, caller: Caller) -> dict:
         thread = self.resolve(args["target"])
         text = args["text"]
-        d = self._require_daemon()
+        d = await self._require_daemon()
         try:
             if thread.status == "unloaded":
                 await d.thread_resume(thread.thread_id)
@@ -586,7 +592,7 @@ class Bridge:
 
     async def op_interrupt(self, args: dict, caller: Caller) -> dict:
         thread = self.resolve(args["target"])
-        d = self._require_daemon()
+        d = await self._require_daemon()
         turn_id = thread.active_turn_id
         if turn_id is None:
             return {"noop": "idle"}
@@ -677,7 +683,7 @@ class Bridge:
 
     async def op_resume(self, args: dict, caller: Caller) -> dict:
         target = args["target"]
-        d = self._require_daemon()
+        d = await self._require_daemon()
         thread_id = self.state.stopped.get(target) or next((tid for tid in self.state.stopped.values() if tid.startswith(target)), target)
         if thread_id in self.state.threads:
             thread = self.state.threads[thread_id]
@@ -703,7 +709,7 @@ class Bridge:
 
     async def op_name(self, args: dict, caller: Caller) -> dict:
         thread = self.resolve(args["target"])
-        d = self._require_daemon()
+        d = await self._require_daemon()
         name = registry.unique_name(args["new"], self.taken_names() - {thread.name})
         try:
             await d.set_name(thread.thread_id, name)

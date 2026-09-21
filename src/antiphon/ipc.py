@@ -27,11 +27,12 @@ LINE_LIMIT = 16 * 1024 * 1024
 class IpcError(Exception):
     """The bridge answered with an error; `kind` is what the CLI maps to an exit code."""
 
-    def __init__(self, kind: str, message: str, raw=None):
+    def __init__(self, kind: str, message: str, raw=None, degraded: list[str] | None = None):
         super().__init__(message)
         self.kind = kind
         self.message = message
         self.raw = raw
+        self.degraded = degraded
 
 
 class BridgeUnreachable(Exception):
@@ -121,7 +122,7 @@ def call_raw(path: str, op: str, args: dict, timeout: float = 30) -> dict:
     log.debug("ipc %s -> %s", op, reply)
     if not reply["ok"]:
         error = reply["error"]
-        raise IpcError(error["kind"], error["message"], error.get("raw"))
+        raise IpcError(error["kind"], error["message"], error.get("raw"), reply.get("degraded"))
     return reply
 
 

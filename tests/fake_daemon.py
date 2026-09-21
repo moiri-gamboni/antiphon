@@ -40,6 +40,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 from antiphon.codex import ws
@@ -245,3 +246,57 @@ class FakeDaemon:
         if callable(spec):
             return spec(params)
         return spec
+
+
+class FakeDaemonThread:
+    """A `FakeDaemon` served from its own event loop in a background thread, for tests
+    whose subject is a separate process (the bridge started lazily by the CLI).
+
+    `replies`/`requests`/`received` are the underlying fake's; `notify`, `drop`,
+    `wait_request`, `wait_connections` and `stop` run on the daemon's loop and block
+    the caller until done.
+    """
+
+    def __init__(self, socket_path):
+        self.fake = FakeDaemon(socket_path)
+        self.replies = self.fake.replies
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True, name="fake-daemon")
+
+    def start(self) -> None:
+        self.thread.start()
+        self._run(self.fake.start())
+
+    def stop(self) -> None:
+        self._run(self.fake.stop())
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(timeout=5)
+        self.loop.close()
+
+    def _run(self, coro, timeout: float = 10):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+
+    @property
+    def requests(self) -> list[dict]:
+        return self.fake.requests
+
+    def received(self, method: str) -> list[dict]:
+        return self.fake.received(method)
+
+    def wait_request(self, method: str, timeout: float = 5) -> dict:
+        return self._run(asyncio.wait_for(self.fake.wait_request(method), timeout), timeout + 1)
+
+    def wait_connections(self, count: int, timeout: float = 5) -> None:
+        """Block until `count` connections have completed their upgrade."""
+
+        async def poll():
+            while len(self.fake.connections) < count or not self.fake.connections[count - 1].upgrade_request:
+                await asyncio.sleep(0.01)
+
+        self._run(asyncio.wait_for(poll(), timeout), timeout + 1)
+
+    def notify(self, method: str, params) -> None:
+        self._run(self.fake.notify(method, params))
+
+    def drop(self) -> None:
+        self._run(self.fake.drop())
