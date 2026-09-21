@@ -308,6 +308,32 @@ def test_wait_on_a_failed_turn_reports_the_failure_text(short_tmp):
     assert last_error["message"].startswith("You’ve hit your usage limit")
 
 
+def test_stop_wakes_a_pending_wait(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, HUMAN)
+            waiting = asyncio.create_task(rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, HUMAN))
+            await asyncio.sleep(0.05)
+            await rig.bridge.dispatch("stop", {"target": "helper"}, HUMAN)
+            return await asyncio.wait_for(waiting, 1)
+
+    assert run(body())["status"] == "stopped"
+
+
+def test_own_thread_closed_wakes_a_pending_wait(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, HUMAN)
+            waiting = asyncio.create_task(rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, HUMAN))
+            await asyncio.sleep(0.05)
+            await rig.fake.notify("thread/closed", {"threadId": THREAD_ID})
+            return await asyncio.wait_for(waiting, 1)
+
+    assert run(body())["status"] == "unloaded"
+
+
 def test_wait_times_out_with_kind_timeout(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

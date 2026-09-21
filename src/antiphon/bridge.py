@@ -499,10 +499,15 @@ class Bridge:
             thread.last_error = {"message": (turn.get("error") or {}).get("message", ""), "at": time.time()}
         self._set_status(thread, "idle")
         self.save()
-        for waiter in self._turn_waiters.pop(thread.thread_id, []):
+        self._wake_waiters(thread.thread_id, status, final)
+        self._spawn(self._announce_turn_end(thread, final), "antiphon-turn-end")
+
+    def _wake_waiters(self, thread_id: str, status: str, final: str | None) -> None:
+        """Hand every pending `wait` on a thread a terminal status, so a stop or a
+        thread going away answers the waiter at once instead of at its own timeout."""
+        for waiter in self._turn_waiters.pop(thread_id, []):
             if not waiter.done():
                 waiter.set_result((status, final))
-        self._spawn(self._announce_turn_end(thread, final), "antiphon-turn-end")
 
     async def _announce_turn_end(self, thread: ThreadState, final: str) -> None:
         """Report the outcome to the spawner, then tell the child's subscribers the thread is idle."""
@@ -521,6 +526,7 @@ class Bridge:
             await self._retire(thread)
         else:
             self._set_status(thread, "unloaded")
+            self._wake_waiters(thread.thread_id, "unloaded", thread.final)
         self.save()
 
     async def on_thread_name_updated(self, params) -> None:
@@ -683,6 +689,7 @@ class Bridge:
         await self._child_exited(thread)
         self.state.threads.pop(thread.thread_id, None)
         self.subscribed.pop(thread.thread_id, None)
+        self._wake_waiters(thread.thread_id, "stopped", None)
 
     # --- peer children ------------------------------------------------------------------
 
