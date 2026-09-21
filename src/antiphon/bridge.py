@@ -105,7 +105,12 @@ class PeerChild:
         outcome = asyncio.get_running_loop().create_future()
         self._deliveries.append(outcome)
         await self.send(cmd="deliver", to_sock=to_sock, text=text, from_name=from_name)
-        return await asyncio.wait_for(outcome, DELIVER_TIMEOUT)
+        try:
+            return await asyncio.wait_for(outcome, DELIVER_TIMEOUT)
+        except TimeoutError:
+            # The answer may still arrive; the cancelled future stays at its place in the
+            # queue so _read discards it instead of pairing it with a later delivery.
+            return {"ev": "send_failed", "reason": f"peer child did not answer within {DELIVER_TIMEOUT} s"}
 
     async def close(self) -> None:
         if self.proc.returncode is None:
@@ -130,12 +135,20 @@ class PeerChild:
                 if kind == "ready":
                     self._ready.set_result(event)
                 elif (kind == "sent" or (kind == "send_failed" and "msg_id" in event)) and self._deliveries:
-                    self._deliveries.popleft().set_result(event)
+                    outcome = self._deliveries.popleft()
+                    if not outcome.done():
+                        outcome.set_result(event)
                     # Let the awaiting sender run before the next line is parsed: a receipt for
                     # this very message may already be buffered, and it must find the sender waiting.
                     await asyncio.sleep(0)
                 else:
                     await self.on_event(self.thread_id, event)
+        except Exception:
+            # The reader stopped while the child may still be alive; a live child whose
+            # stdout no one reads loses every later frame, so end it and let the bridge respawn.
+            log.exception("reader of peer child %s stopped unexpectedly", self.pid)
+            if self.proc.returncode is None:
+                self.proc.kill()
         finally:
             for outcome in self._deliveries:
                 if not outcome.done():

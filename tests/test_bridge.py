@@ -1326,6 +1326,86 @@ def test_a_deliverys_awaiter_runs_before_the_childs_next_event_is_dispatched(sho
     assert [e["ev"] for e in events] == ["status", "exited"]
 
 
+class StubProc:
+    """A peer child process stand-in: a controllable stdout, a stdin that swallows
+    writes, and a returncode the reader's kill/wait can move off None."""
+
+    pid = 4321
+
+    def __init__(self):
+        self.returncode = None
+        self.stdout = asyncio.StreamReader()
+
+        async def _drain():
+            pass
+
+        self.stdin = type("Stdin", (), {"write": lambda self, data: None, "drain": staticmethod(_drain)})()
+        self.killed = False
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
+def test_a_delivery_that_times_out_is_reported_and_the_reader_keeps_relaying(short_tmp, monkeypatch):
+    from antiphon import bridge as bridge_mod
+    from antiphon.bridge import PeerChild
+
+    monkeypatch.setattr(bridge_mod, "DELIVER_TIMEOUT", 0.1)
+
+    async def body():
+        events = []
+
+        async def on_event(thread_id, event):
+            events.append(event)
+
+        child = PeerChild(THREAD_ID, short_tmp / "peer.log", short_tmp / "cc", on_event)
+        child.proc = StubProc()
+        child._reader = asyncio.create_task(child._read())
+        answer = await child.deliver("/nowhere.sock", "hi", "helper")  # no answer within the timeout
+        # The late `sent` for the timed-out delivery, then a real inbound frame.
+        child.proc.stdout.feed_data(
+            b'{"ev": "sent", "msg_id": "m1"}\n'
+            b'{"ev": "inbound", "msg_id": "m2", "from_sock": "s", "from_name": "x", "text": "y"}\n'
+        )
+        await until(lambda: any(e["ev"] == "inbound" for e in events))
+        reader_alive = not child._reader.done()
+        child.proc.stdout.feed_eof()
+        await child._reader
+        return answer, [e["ev"] for e in events], reader_alive
+
+    answer, event_kinds, reader_alive = run(body())
+    assert answer["ev"] == "send_failed"
+    assert reader_alive
+    assert event_kinds == ["inbound", "exited"]
+
+
+def test_a_reader_error_while_the_child_lives_kills_it_and_emits_exited(short_tmp):
+    from antiphon.bridge import PeerChild
+
+    async def body():
+        events = []
+
+        async def on_event(thread_id, event):
+            events.append(event)
+
+        child = PeerChild(THREAD_ID, short_tmp / "peer.log", short_tmp / "cc", on_event)
+        child.proc = StubProc()
+        child._reader = asyncio.create_task(child._read())
+        child.proc.stdout.feed_data(b"not json\n")
+        await child._reader
+        return child.proc.killed, events
+
+    killed, events = run(body())
+    assert killed is True
+    assert [e["ev"] for e in events] == ["exited"]
+
+
 def test_a_send_the_child_cannot_write_is_a_delivery_error(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
