@@ -151,6 +151,9 @@ class Daemon:
     async def respond(self, request_id: int, result) -> None:
         await self._send({"jsonrpc": "2.0", "id": request_id, "result": result})
 
+    async def respond_error(self, request_id: int, code: int, message: str) -> None:
+        await self._send({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
+
     async def close(self) -> None:
         self._reader.cancel()
         self._dispatcher.cancel()

@@ -24,6 +24,7 @@ def full_thread() -> ThreadState:
         effort="high",
         review_by_parent=True,
         worktree="/work/repo-worktrees/helper",
+        outcome="completed",
         final="done: 42",
         sub_agents={
             "01a0c43e-3d95-7800-949d-06535c89fe5f": SubAgent(

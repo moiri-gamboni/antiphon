@@ -60,7 +60,8 @@ class ThreadState:
     effort: str | None = None
     review_by_parent: bool = False
     worktree: str | None = None
-    final: str | None = None  # the last turn's outcome: its final answer or "<status>: <error>"
+    outcome: str | None = None  # the last turn's status: "completed" | "failed" | "interrupted"
+    final: str | None = None  # the last turn's outcome text: its final answer or "<status>: <error>"
     sub_agents: dict[str, SubAgent] = field(default_factory=dict)
 
 

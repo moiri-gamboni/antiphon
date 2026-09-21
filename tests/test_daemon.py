@@ -187,6 +187,24 @@ def test_a_message_with_id_and_method_is_a_server_request_and_respond_answers_it
     assert json.loads(wire) == answer
 
 
+def test_respond_error_answers_a_server_request_with_a_json_rpc_error(tmp_path):
+    request = APPROVAL.server_requests("item/commandExecution/requestApproval")[0]
+
+    async def body():
+        async with Harness(tmp_path) as h:
+            request_id = await h.fake.server_request(request["method"], request["params"])
+            await until(lambda: h.server_requests)
+            await h.daemon.respond_error(request_id, -32601, "antiphon does not answer item/commandExecution/requestApproval")
+            return await h.fake.response(request_id)
+
+    answer = run(body())
+    assert answer == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"code": -32601, "message": "antiphon does not answer item/commandExecution/requestApproval"},
+    }
+
+
 def test_a_raising_notification_handler_is_logged_with_the_raw_frame_and_the_reader_continues(tmp_path, caplog):
     started, completed = APPROVAL.notifications("turn/started")[0], APPROVAL.notifications("turn/completed")[0]
     seen = []
