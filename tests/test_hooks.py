@@ -20,9 +20,9 @@ DENIED = load_fixture("auto-review-denied.jsonl").notifications("item/autoApprov
 def pending_from_capture() -> Pending:
     command, cwd = describe_action(DENIED["action"])
     return Pending(
-        token="e16d64", thread_id="t1", review_id=DENIED["reviewId"], target_item_id=DENIED["targetItemId"],
+        token="e16d64", thread_id="t1",
         turn_id=DENIED["turnId"], command=command, cwd=cwd, rationale=DENIED["review"]["rationale"],
-        risk_level=DENIED["review"]["riskLevel"], review_started_params=None, review_completed_params=DENIED,
+        risk_level=DENIED["review"]["riskLevel"], review_completed_params=DENIED,
         since=0.0, resolved=False, kind="denied", request_id=None, epoch=None, available_decisions=None,
     )
 

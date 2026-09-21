@@ -4,7 +4,7 @@ antiphon makes Claude Code sessions and Codex CLI sessions peers of each other o
 
 ## Layout
 
-- `src/antiphon/` — the package, standard library only at runtime. `bridge.py` (the one bridge process: daemon connection, thread table, reconcile, peer children, the driving ops), `cli.py` (every verb, the exit codes, lazy bridge start), `ipc.py` (control socket), `state.py` (`~/.antiphon/state.json`), `callers.py` (who is calling, by process ancestry, and the ownership rule), `peers.py` (the Codex-side verbs), `tmux.py` (attach), `rawlog.py`.
+- `src/antiphon/` — the package, standard library only at runtime. `bridge.py` (the one bridge process: daemon connection, thread table, reconcile, peer children, the driving ops), `cli.py` (every verb, the exit codes, lazy bridge start), `ipc.py` (control socket), `state.py` (`~/.antiphon/state.json`), `callers.py` (who is calling, by process ancestry, and the ownership rule), `peers.py` (the Codex-side verbs), `rawlog.py`.
   - `codex/` — the app-server adapter: `ws.py` (WebSocket over the daemon's Unix socket), `daemon.py` (JSON-RPC client, thread verbs, the `deliver` ladder), `approvals.py` (escalations forwarded to the spawner and answered by token).
   - `claude/` — the peer-protocol adapter: `registry.py` (session records, pins), `peer.py` (the child process that is one Codex thread's peer identity).
 - `skills/claude/`, `skills/codex/` — the two skills `install.sh` symlinks into place; `hooks/` — the optional Claude Code approval prompt hook and the Codex guard example; `contrib/` — the systemd unit and launchd plist.
