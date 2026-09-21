@@ -79,9 +79,9 @@ def classify(
     return Caller(kind="human", claude_pid=None, claude_session_id=None, codex_thread=None)
 
 
-def permits(caller: Caller, verb: str, spawner: str | None) -> bool:
-    """The ownership rule: whether `caller` may run `verb` on a thread spawned by `spawner`
-    (`None` when the caller is acting on itself)."""
+def permits(caller: Caller, spawner: str | None) -> bool:
+    """The ownership rule, the same for every gated op: whether `caller` may act on a
+    thread spawned by `spawner` (`None` when the caller is acting on itself)."""
     if spawner is None:
         return True
     if caller.kind in ("claude", "human"):

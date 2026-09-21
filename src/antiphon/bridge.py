@@ -344,7 +344,7 @@ class Bridge:
             thread = self.resolve(args["target"])
         # A Codex thread renaming itself is not acting on another caller's thread.
         spawner = None if op == "name" and thread.thread_id == caller.codex_thread else thread.spawner
-        if not callers.permits(caller, op, spawner):
+        if not callers.permits(caller, spawner):
             raise IpcError("forbidden", callers.forbidden_message(caller, op, spawner))
 
     def live_records(self) -> list[registry.Record]:
