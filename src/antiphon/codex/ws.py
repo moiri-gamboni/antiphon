@@ -5,6 +5,9 @@ exchanges JSON-RPC as text frames. Client frames are masked (the RFC 6455
 requirement), server frames are not. Only text, ping, pong and close frames
 are expected; a ping is answered with a pong carrying the same payload.
 """
+
+from __future__ import annotations
+
 import asyncio
 import base64
 import os
@@ -65,7 +68,7 @@ class UnixWebSocket:
         self._last_bytes = b""
 
     @classmethod
-    async def connect(cls, path: str, upgrade_path: str = "/rpc") -> "UnixWebSocket":
+    async def connect(cls, path: str, upgrade_path: str = "/rpc") -> UnixWebSocket:
         reader, writer = await asyncio.open_unix_connection(path)
         key = base64.b64encode(os.urandom(16)).decode()
         writer.write(upgrade_request(key, upgrade_path))

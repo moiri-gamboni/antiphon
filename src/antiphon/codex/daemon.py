@@ -8,6 +8,9 @@ second task that awaits the handlers one at a time in arrival order, so the
 bridge sees the daemon's events in the order the daemon emitted them and a
 handler may itself call `request()` while the reader keeps resolving replies.
 """
+
+from __future__ import annotations
+
 import asyncio
 import importlib.metadata
 import itertools
@@ -117,7 +120,7 @@ class Daemon:
         self._dispatcher = asyncio.create_task(self._dispatch_loop(), name="antiphon-codex-dispatch")
 
     @classmethod
-    async def connect(cls, socket_path: str, on_notification, on_server_request, rawlog=None) -> "Daemon":
+    async def connect(cls, socket_path: str, on_notification, on_server_request, rawlog=None) -> Daemon:
         sock = await ws.UnixWebSocket.connect(socket_path)
         d = cls(sock, on_notification, on_server_request, rawlog)
         try:
