@@ -25,8 +25,9 @@ WAIT_RETRY_BACKOFF = 3.0
 WAIT_DEFAULT_TIMEOUT = 600.0
 LOG_TAIL_LINES = 20
 
-# Exit codes: 1 bridge unreachable, 2 usage or precondition, 3 delivery rejected,
-# 4 timeout, 5 daemon unreachable, 6 turn failed or interrupted.
+# IpcError kind to exit code. Beyond this map: an unlisted kind and a BridgeUnreachable both
+# exit 1 (no bridge, or an internal bridge error); verb_ping exits 2 on a degraded reply and
+# _wait exits 6 on a failed or interrupted turn, both directly rather than through this map.
 EXIT_CODES = {
     "internal": 1,
     "usage": 2,

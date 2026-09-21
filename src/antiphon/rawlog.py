@@ -1,8 +1,9 @@
 """Append-only log of every raw message crossing an external boundary.
 
 One JSON line per message: `{"t": <epoch seconds>, "dir": "in"|"out",
-"boundary": <which peer>, "data": <the raw message>}`. Whoever debugs the next
-protocol failure reads this file; nothing else does.
+"boundary": <the external interface: "codex", "codex-cli", "git", "tmux", or a
+client-side marker such as "codex.deliver">, "data": <the raw message>}`. Whoever
+debugs the next protocol failure reads this file; nothing else does.
 """
 import json
 import os

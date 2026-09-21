@@ -282,7 +282,8 @@ class Approvals:
         except DaemonError as e:
             # The override's payload shape is pinned only for a captured `command` action;
             # when the daemon refuses it, the approval still reaches the thread as an
-            # instruction the reviewer sees on the retry.
+            # instruction. Whether a retry after either path runs unreviewed, is re-reviewed
+            # and approved, or is denied again has not been captured.
             log.warning("override refused for %s (%s); approving by message instead: %r", record.token, thread.name, e)
             retry = f"I approve running `{record.command}` in `{record.cwd}`: retry it now."
         else:

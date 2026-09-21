@@ -34,8 +34,8 @@ class Caller:
             assert self.claude_session_id is not None
             return self.claude_session_id
         if self.kind == "codex":
-            # An unrecognised or absent claimed thread owns nothing: the empty
-            # string never equals a real spawner id.
+            # An unrecognised or absent claimed thread owns nothing; op_start and op_resume
+            # refuse such a caller, so this empty string is never stored as a thread's spawner.
             return self.codex_thread or ""
         return "human"
 

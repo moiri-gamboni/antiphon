@@ -117,7 +117,12 @@ def live_records(directory: Path | None = None) -> list[Record]:
 
 
 def pins_ok(record: Record, proc_root: Path | str = "/proc") -> list[str]:
-    """Every way the record departs from the shape this adapter was written against."""
+    """Every way the record departs from the shape this adapter was written against.
+
+    Raises FileNotFoundError if the process exits between ``live_records()`` and this call
+    (Linux, reading ``/proc/<pid>/stat``); callers treat that as "the record just died",
+    not a pin failure.
+    """
     data = record.data
     failures = []
     for field in REQUIRED_FIELDS:
