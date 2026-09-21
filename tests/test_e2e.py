@@ -262,6 +262,8 @@ def test_a_blocking_request_reaches_claude_and_cli_approve_answers_accept(short_
         async with Rig(short_tmp) as rig:
             await rig.start_thread(review_by_parent=True)
             request_id = await rig.fake.server_request("item/commandExecution/requestApproval", for_thread(REQUEST_PARAMS))
+            await until(lambda: rig.bridge.state.threads[THREAD_ID].pending)
+            rig.bridge.state.threads[THREAD_ID].active_turn_id = REQUEST_PARAMS["turnId"]
             [frame] = await rig.frames(1, timeout=5.0)
             token = frame["message"]["content"].split("(token ", 1)[1][:6]
             code = await cli_in_thread(rig, monkeypatch, "approve", token)

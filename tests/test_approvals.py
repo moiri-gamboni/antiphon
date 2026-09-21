@@ -190,6 +190,9 @@ async def blocked(rig: Rig, params: dict = REQUEST["params"]) -> tuple[int, str]
     """A blocking request for the rig's thread; the request id and the token it got."""
     request_id = await rig.fake.server_request("item/commandExecution/requestApproval", for_thread(params))
     await until(lambda: rig.bridge.state.threads[THREAD_ID].pending)
+    # A blocking request always arrives during its turn; mirror that so the answer sees a
+    # live turn (the fakes do not always emit turn/started before the request).
+    rig.bridge.state.threads[THREAD_ID].active_turn_id = params["turnId"]
     return request_id, request_token(params["itemId"])
 
 
@@ -335,6 +338,37 @@ def test_a_blocked_request_is_renotified_once_after_ten_minutes_and_never_cancel
 
 # Provisional: what the daemon does with a request whose connection dropped is not
 # captured; the bridge takes the conservative branch and says so.
+def test_a_blocking_request_is_retired_when_its_turn_completes(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(review_by_parent=True)
+            request_id, token = await blocked(rig)
+            # The asking turn ends (e.g. interrupted) with the request never answered.
+            completed = for_thread(COMPLETED_NOTICE)
+            completed["turn"]["id"] = REQUEST["params"]["turnId"]
+            await rig.fake.notify("turn/completed", completed)
+            await until(lambda: not rig.bridge.state.threads[THREAD_ID].pending)
+            return rig.bridge.state.threads[THREAD_ID].pending
+
+    assert run(body()) == []
+
+
+def test_approve_refuses_a_request_whose_turn_has_ended(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(review_by_parent=True)
+            request_id, token = await blocked(rig)
+            rig.bridge.state.threads[THREAD_ID].active_turn_id = "01a0c000-0000-0000-0000-000000000099"
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.bridge.dispatch("approve", {"token": token}, rig.caller)
+            return info.value, await answered(rig, request_id)
+
+    error, answer = run(body())
+    assert error.kind == "precondition"
+    assert "has ended" in error.message
+    assert answer is None
+
+
 def test_a_request_from_a_dropped_connection_is_retired_at_the_reconnect_interrupting_its_turn(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

@@ -262,7 +262,10 @@ class Approvals:
         if thread is None:
             return
         records = self.pending(thread)
-        kept = [p for p in records if not p.resolved]
+        turn_id = params["turn"]["id"]
+        # Drop resolved records, and any blocking request whose asking turn just ended: a
+        # request cannot outlive its turn, so keeping it would show a false "blocked" label.
+        kept = [p for p in records if not p.resolved and not (p.kind == "request" and p.turn_id == turn_id)]
         if len(kept) != len(records):
             self._store(thread, kept)
 
@@ -310,6 +313,11 @@ class Approvals:
         if record.epoch != d.epoch:
             await self._lost(thread, record, d)
             raise IpcError("precondition", f"approval {record.token} was lost with the Codex connection")
+        if thread.active_turn_id != record.turn_id:
+            # The asking turn is over (interrupted, say); its request id is dead, so answering
+            # it would report a success that reaches nothing. Drop the stale record and refuse.
+            self._store(thread, [p for p in self.pending(thread) if p.token != record.token])
+            raise IpcError("precondition", f"the turn that asked for approval {record.token} has ended")
         await d.respond(record.request_id, result)
         self._resolve(thread, record)
 
