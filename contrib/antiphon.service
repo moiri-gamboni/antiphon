@@ -1,0 +1,33 @@
+# The antiphon bridge as a systemd user service (Linux).
+#
+# `install.sh install` fills the placeholders and does the rest. By hand:
+#
+#   sed -e "s|@ANTIPHON@|$(command -v antiphon)|" -e "s|@PATH@|$PATH|" -e "/@ENVIRONMENT@/d" \
+#       contrib/antiphon.service > ~/.config/systemd/user/antiphon.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now antiphon
+#
+# Remove with:
+#
+#   systemctl --user disable --now antiphon
+#   rm ~/.config/systemd/user/antiphon.service
+#
+# @PATH@ must reach `codex`, which the bridge runs to start the app-server daemon.
+# When CLAUDE_CONFIG_DIR, CODEX_HOME or ANTIPHON_HOME is set for your sessions, add an
+# Environment= line for each so the bridge reads the same directories. Logs go to
+# `journalctl --user -u antiphon`.
+
+[Unit]
+Description=antiphon bridge: Codex threads as Claude Code peers, and back
+
+[Service]
+ExecStart=@ANTIPHON@ bridge
+Environment=PATH=@PATH@
+@ENVIRONMENT@
+# A bridge that finds another one already answering exits 0 and must not be restarted
+# into it; a crash is restarted.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
