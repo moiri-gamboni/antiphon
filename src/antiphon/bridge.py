@@ -203,6 +203,7 @@ class Bridge:
         self.pin_failures: list[str] = []
         self.codex_failures: dict[str, str] = {}
         self._unknown_actions: set[str] = set()
+        self._recovered_turns: set[str] = set()  # turn ids announced from the turn list, whose completion may still arrive
         self._turn_waiters: dict[str, list[asyncio.Future]] = {}
         self.last_reconcile: float | None = None
         self._reconcile_lock = asyncio.Lock()
@@ -424,12 +425,13 @@ class Bridge:
     async def on_thread_status_changed(self, params) -> None:
         status = _status_of(params)
         thread = self.state.threads.get(params["threadId"])
+        sub = self._sub_agent(params["threadId"])
         if thread is not None:
             self._set_status(thread, status)
+        elif sub is not None:
+            sub.status = status
         else:
-            sub = self._sub_agent(params["threadId"])
-            if sub is not None:
-                sub.status = status
+            return
         self.save()
 
     async def on_turn_started(self, params) -> None:
@@ -444,12 +446,20 @@ class Bridge:
         thread = self.state.threads.get(params["threadId"])
         if thread is None:
             return
-        status, final = _outcome(params["turn"])
+        if params["turn"]["id"] in self._recovered_turns:
+            # Already recorded and announced from the turn list after a reconnect.
+            self._recovered_turns.discard(params["turn"]["id"])
+            return
+        self._record_turn_end(thread, params["turn"])
+
+    def _record_turn_end(self, thread: ThreadState, turn: dict) -> None:
+        """Record a finished turn's outcome, wake the waiters, and announce it."""
+        status, final = _outcome(turn)
         thread.outcome = status
         thread.final = final
         thread.active_turn_id = None
         if status != "completed":
-            thread.last_error = {"message": (params["turn"].get("error") or {}).get("message", ""), "at": time.time()}
+            thread.last_error = {"message": (turn.get("error") or {}).get("message", ""), "at": time.time()}
         self._set_status(thread, "idle")
         self.save()
         for waiter in self._turn_waiters.pop(thread.thread_id, []):
@@ -519,9 +529,9 @@ class Bridge:
                 return
             try:
                 await self._reconcile_with(d)
-            except (TransportClosed, DaemonError) as e:
-                # The connection went away mid-pass or the daemon refused a call; the
-                # next pass (or the reconnect) starts over from the daemon's truth.
+            except (TransportClosed, DaemonError, TimeoutError) as e:
+                # The connection went away mid-pass or the daemon refused or sat on a call;
+                # the next pass (or the reconnect) starts over from the daemon's truth.
                 log.warning("reconcile interrupted: %r", e)
             except Exception:
                 # A reply in a shape this bridge cannot read must not stop every later pass.
@@ -545,6 +555,7 @@ class Bridge:
                 await self.ensure_peer(thread)
 
     async def _subscribe(self, d: Daemon, thread: ThreadState) -> None:
+        was_busy = thread.status in ("busy", "approval")
         try:
             result = await d.thread_resume(thread.thread_id)
         except DaemonError as e:
@@ -557,6 +568,21 @@ class Bridge:
             return
         self.subscribed[thread.thread_id] = d.epoch
         self._set_status(thread, _status_of(result["thread"]))
+        if was_busy:
+            await self._recover_turn(d, thread)
+
+    async def _recover_turn(self, d: Daemon, thread: ThreadState) -> None:
+        """What became of the turn that was running when the bridge last saw this thread:
+        it may have ended while the bridge or the daemon was away, unseen."""
+        turns = (await d.request("thread/turns/list", {"threadId": thread.thread_id, "limit": 1, "sortDirection": "desc"}))["data"]
+        if not turns:
+            return
+        turn = turns[0]
+        if turn["status"] == "inProgress":
+            thread.active_turn_id = turn["id"]
+            return
+        self._recovered_turns.add(turn["id"])
+        self._record_turn_end(thread, turn)
 
     async def _refresh_adopted(self, d: Daemon, thread: ThreadState, loaded: set[str]) -> None:
         if thread.thread_id not in loaded:
@@ -603,11 +629,12 @@ class Bridge:
                 failures.extend(registry.pins_ok(record))
             except FileNotFoundError:
                 continue  # the session exited between the listing and the process read
-        if failures != self.pin_failures:
-            for failure in failures:
-                log.error("Claude Code peer protocol pin failed: %s", failure)
-            if not failures:
-                log.info("Claude Code peer protocol pins clean again")
+        if failures == self.pin_failures:
+            return
+        for failure in failures:
+            log.error("Claude Code peer protocol pin failed: %s", failure)
+        if not failures:
+            log.info("Claude Code peer protocol pins clean again")
         self.pin_failures = failures
         self._update_degraded()
 
@@ -644,6 +671,7 @@ class Bridge:
         except (TimeoutError, RuntimeError, ConnectionError) as e:
             # The thread stays hosted without a peer identity; the next reconcile tries again.
             log.error("peer child for %s did not register: %r (see %s)", thread.name, e, child.log_path)
+            self.children.pop(thread.thread_id, None)
             await child.close()
             return
         thread.child_pid = ready["pid"]
@@ -784,12 +812,18 @@ class Bridge:
         if len(by_prefix) > 1:
             names = sorted(t.name for t in by_prefix)
             raise IpcError("ambiguous", f"{target!r} matches several threads: {', '.join(names)}", names)
-        stopped = self.state.stopped.get(target) or next((tid for tid in self.state.stopped.values() if tid.startswith(target)), None)
+        stopped = self._stopped_id(target)
         if stopped is not None:
             raise IpcError("stopped", f"{target!r} was stopped; bring it back with: antiphon resume {stopped}")
         if registry.by_name(target, self.sessions_dir) is not None:
             raise IpcError("not_a_thread", f"{target!r} is a Claude Code session, not a Codex thread")
         raise IpcError("unknown_target", f"no thread named {target!r}")
+
+    def _stopped_id(self, target: str) -> str | None:
+        """The thread id a stopped thread's former name, id or id prefix refers to."""
+        if target in self.state.stopped:
+            return self.state.stopped[target]
+        return next((tid for tid in self.state.stopped.values() if tid.startswith(target)), None)
 
     # --- ops ---------------------------------------------------------------------------------
 
@@ -817,21 +851,24 @@ class Bridge:
         if args["worktree"]:
             worktree = await asyncio.to_thread(self._add_worktree, cwd, name)
             cwd = worktree
-        try:
-            result = await d.thread_start(cwd, name, args["read_only"], args.get("model"), args.get("effort"), args["review_by_parent"])
-        except DaemonError as e:
-            raise IpcError("daemon", f"thread/start failed: {e.error.get('message')}", e.error) from e
-        thread_id = result["thread"]["id"]
-        thread = ThreadState(
-            thread_id=thread_id, name=name, cwd=cwd, origin="spawned", spawner=caller.owner_id,
-            read_only=args["read_only"], report=args["report"], model=args.get("model"), effort=args.get("effort"),
-            review_by_parent=args["review_by_parent"], worktree=worktree,
-        )
-        self.state.threads[thread_id] = thread
-        # thread/start subscribes the connection that made it.
-        self.subscribed[thread_id] = d.epoch
-        self.save()
-        await self.ensure_peer(thread)
+        # The daemon broadcasts thread/started before thread/start's own reply chain is
+        # done; holding the reconcile lock keeps that pass from adopting our own thread.
+        async with self._reconcile_lock:
+            try:
+                result = await d.thread_start(cwd, name, args["read_only"], args.get("model"), args.get("effort"), args["review_by_parent"])
+            except DaemonError as e:
+                raise IpcError("daemon", f"thread/start failed: {e.error.get('message')}", e.error) from e
+            thread_id = result["thread"]["id"]
+            thread = ThreadState(
+                thread_id=thread_id, name=name, cwd=cwd, origin="spawned", spawner=caller.owner_id,
+                read_only=args["read_only"], report=args["report"], model=args.get("model"), effort=args.get("effort"),
+                review_by_parent=args["review_by_parent"], worktree=worktree,
+            )
+            self.state.threads[thread_id] = thread
+            # thread/start subscribes the connection that made it.
+            self.subscribed[thread_id] = d.epoch
+            self.save()
+            await self.ensure_peer(thread)
         return {"name": name, "thread_id": thread_id, "cwd": cwd}
 
     def _add_worktree(self, cwd: str, name: str) -> str:
@@ -962,27 +999,28 @@ class Bridge:
     async def op_resume(self, args: dict, caller: Caller) -> dict:
         target = args["target"]
         d = await self._require_daemon()
-        thread_id = self.state.stopped.get(target) or next((tid for tid in self.state.stopped.values() if tid.startswith(target)), target)
-        if thread_id in self.state.threads:
-            thread = self.state.threads[thread_id]
-            return {"name": thread.name, "thread_id": thread_id}
-        try:
-            result = await d.thread_resume(thread_id)
-        except DaemonError as e:
-            raise IpcError("precondition", f"thread/resume {thread_id} failed: {e.error.get('message')}", e.error) from e
-        info = result["thread"]
-        former = next((n for n, tid in self.state.stopped.items() if tid == thread_id), None)
-        name = registry.unique_name(former or info.get("name") or f"codex-{os.path.basename(info['cwd'])}", self.taken_names())
-        thread = ThreadState(
-            thread_id=thread_id, name=name, cwd=info["cwd"], origin="spawned", spawner=caller.owner_id,
-            read_only=(result.get("sandbox") or {}).get("type") == "readOnly", status=_status_of(info),
-        )
-        self.state.threads[thread_id] = thread
-        self.subscribed[thread_id] = d.epoch
-        if former is not None:
-            del self.state.stopped[former]
-        self.save()
-        await self.ensure_peer(thread)
+        thread_id = self._stopped_id(target) or target
+        async with self._reconcile_lock:
+            if thread_id in self.state.threads:
+                thread = self.state.threads[thread_id]
+                return {"name": thread.name, "thread_id": thread_id}
+            try:
+                result = await d.thread_resume(thread_id)
+            except DaemonError as e:
+                raise IpcError("precondition", f"thread/resume {thread_id} failed: {e.error.get('message')}", e.error) from e
+            info = result["thread"]
+            former = next((n for n, tid in self.state.stopped.items() if tid == thread_id), None)
+            name = registry.unique_name(former or info.get("name") or f"codex-{os.path.basename(info['cwd'])}", self.taken_names())
+            thread = ThreadState(
+                thread_id=thread_id, name=name, cwd=info["cwd"], origin="spawned", spawner=caller.owner_id,
+                read_only=(result.get("sandbox") or {}).get("type") == "readOnly", status=_status_of(info),
+            )
+            self.state.threads[thread_id] = thread
+            self.subscribed[thread_id] = d.epoch
+            if former is not None:
+                del self.state.stopped[former]
+            self.save()
+            await self.ensure_peer(thread)
         return {"name": name, "thread_id": thread_id}
 
     async def op_name(self, args: dict, caller: Caller) -> dict:

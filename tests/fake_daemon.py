@@ -146,6 +146,7 @@ class FakeDaemon:
         self._server = None
         self._served: dict[str, int] = {}
         self._waiters: list[tuple[list, str, asyncio.Future]] = []
+        self._late: set[asyncio.Task] = set()
 
     @property
     def conn(self) -> Connection:
@@ -231,8 +232,19 @@ class FakeDaemon:
         self.requests.append(message)
         self._wake_waiters(self.requests, message)
         reply = self._reply_for(message["method"], message.get("params"))
-        if reply is not None:
+        if asyncio.iscoroutine(reply):
+            # A callable may return a coroutine to answer later, without holding up the
+            # requests that arrive meanwhile (a slow daemon call racing another).
+            task = asyncio.create_task(self._answer_later(conn, message["id"], reply))
+            self._late.add(task)
+            task.add_done_callback(self._late.discard)
+        elif reply is not None:
             await conn.send_json({"id": message["id"], **reply})
+
+    async def _answer_later(self, conn: "Connection", request_id: int, pending) -> None:
+        reply = await pending
+        if not conn.closed.is_set():
+            await conn.send_json({"id": request_id, **reply})
 
     def _reply_for(self, method: str, params) -> dict | None:
         spec = self.replies.get(method)

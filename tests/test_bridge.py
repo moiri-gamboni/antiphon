@@ -464,6 +464,113 @@ def test_a_thread_read_of_an_unknown_shape_fails_one_pass_and_the_next_pass_stil
     assert "reconcile failed" in caplog.text and "KeyError" in caplog.text
 
 
+def test_reconnect_survives_a_connection_dropped_during_initialize(short_tmp):
+    """The restart capture shows the socket accepting one connection and dropping it before
+    the new daemon answers `initialize`; the bridge must treat that as one more retry."""
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            first_epoch = rig.bridge.daemon.epoch
+            rig.fake.replies["initialize"] = None
+            await rig.fake.drop()
+            await until(lambda: len(rig.fake.received("initialize")) == 2)
+            rig.fake.conn.abort()
+            rig.fake.replies["initialize"] = {"result": THREAD_START.result(1)}
+            await until(lambda: rig.bridge.daemon is not None and rig.bridge.daemon.epoch > first_epoch)
+            await until(lambda: len(rig.fake.received("thread/resume")) == 1)
+            return len(rig.fake.received("initialize")), rig.bridge.daemon.epoch - first_epoch
+
+    initializes, epochs = run(body())
+    assert initializes == 3
+    assert epochs == 2
+
+
+def test_a_turn_that_ended_while_the_bridge_was_away_is_recovered_on_resubscribe(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, HUMAN)
+        # A fresh bridge over the same home: the state file says busy, the daemon says idle.
+        rig.fake = FakeDaemon(rig.daemon_sock)
+        rig.fake.replies.update(default_replies())
+        rig.bridge = rig.make_bridge()
+        async with rig:
+            result = await rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, HUMAN)
+            interrupt = await rig.bridge.dispatch("interrupt", {"target": "helper"}, HUMAN)
+            return result, interrupt, rig.methods()
+
+    result, interrupt, methods = run(body())
+    assert result == {"status": "completed", "final": "BLOCKED", "thread_id": THREAD_ID}
+    assert interrupt == {"noop": "idle"}
+    assert methods[:3] == ["thread/loaded/list", "thread/resume", "thread/turns/list"]
+
+
+def test_a_wait_in_flight_across_a_daemon_restart_gets_the_recovered_outcome(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, HUMAN)
+            waiting = asyncio.create_task(rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, HUMAN))
+            await asyncio.sleep(0.05)
+            await rig.fake.drop()
+            return await asyncio.wait_for(waiting, 5)
+
+    assert run(body()) == {"status": "completed", "final": "BLOCKED", "thread_id": THREAD_ID}
+
+
+def test_a_recovered_turn_is_announced_once_even_if_its_completion_arrives_afterwards(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            spawner = Caller(kind="claude", claude_pid=claude.pid, claude_session_id=claude.record["sessionId"], codex_thread=None)
+            try:
+                await rig.start_thread(caller=spawner)
+                await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, spawner)
+                await rig.fake.drop()
+                await until(lambda: rig.bridge.state.threads[THREAD_ID].outcome == "completed")
+                late = for_thread(COMPLETED_NOTICE)
+                late["turn"]["id"] = COMPLETED_TURN["id"]
+                await rig.fake.notify("turn/completed", late)
+                frames = await asyncio.to_thread(claude.wait_for_frames, 2, 1.0)
+                return frames
+            finally:
+                claude.close()
+
+    frames = run(body())
+    assert [f["message"]["content"].split("\n")[1] for f in frames] == ["BLOCKED"]
+
+
+def test_the_thread_started_broadcast_for_our_own_new_thread_does_not_adopt_it(short_tmp):
+    async def slow_name_set(params):
+        await asyncio.sleep(0.4)
+        return {"result": {}}
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                rig.fake.replies["thread/name/set"] = slow_name_set
+                rig.fake.replies["thread/loaded/list"] = {"result": {"data": [THREAD_ID], "nextCursor": None}}
+                rig.fake.replies["thread/read"] = {"result": {"thread": THREAD_START.result(2)["thread"]}}
+                starting = asyncio.create_task(rig.start_thread(name="helper", caller=CLAUDE))
+                await asyncio.sleep(0.1)
+                await rig.fake.notify("thread/started", THREAD_START.notifications("thread/started")[0])
+                await starting
+                await rig.bridge.reconcile()
+                thread = rig.bridge.state.threads[THREAD_ID]
+                names = sorted(r.name for r in rig.bridge.live_records())
+                return thread, names, list(rig.bridge.children)
+            finally:
+                claude.close()
+
+    thread, names, children = run(body())
+    assert (thread.origin, thread.spawner, thread.name) == ("spawned", CLAUDE.claude_session_id, "helper")
+    assert thread.child_pid is not None
+    assert names == ["claude-main", "helper"]
+    assert children == [THREAD_ID]
+
+
 def test_ping_reports_the_daemon_unreachable_while_it_is_down(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

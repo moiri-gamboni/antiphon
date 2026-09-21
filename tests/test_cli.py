@@ -223,6 +223,7 @@ def test_wait_survives_a_bridge_restart(rig, capsys):
     mid_turn = copy.deepcopy(RESTART.result(6))
     mid_turn["thread"]["status"] = {"type": "active", "activeFlags": []}
     rig.daemon.replies["thread/resume"] = {"result": mid_turn}
+    rig.daemon.replies["thread/turns/list"] = {"result": {"data": [TURN_STARTED["turn"]], "nextCursor": None, "backwardsCursor": None}}
     waiting = subprocess.Popen([sys.executable, "-m", "antiphon", "wait", "helper"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(os.environ))
     time.sleep(0.5)
     os.kill(rig.bridge_pid(), signal.SIGKILL)
