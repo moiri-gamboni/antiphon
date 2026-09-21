@@ -27,6 +27,7 @@ from pathlib import Path
 from antiphon import callers, ipc, peers
 from antiphon.callers import Caller
 from antiphon.claude import registry
+from antiphon.codex import approvals as approvals_mod
 from antiphon.codex import daemon as daemon_mod
 from antiphon.codex.daemon import Daemon, DaemonError, DaemonUnavailable, deliver
 from antiphon.codex.ws import TransportClosed
@@ -39,6 +40,9 @@ log = logging.getLogger("antiphon.bridge")
 # Daemon methods whose disappearance means the protocol moved under us.
 PINNED_METHODS = ("thread/loaded/list", "turn/steer", "thread/resume")
 METHOD_NOT_FOUND = -32601
+# Ops that act on one thread, gated by who spawned it.
+# `send` is absent: every caller may send, and its target may be a Claude session rather than a thread.
+OWNED_OPS = frozenset({"interrupt", "stop", "name", "approve", "deny", "wait", "status"})
 WAIT_DEFAULT_TIMEOUT = 600.0
 DAEMON_WAIT = 3.0
 REGISTER_TIMEOUT = 10.0
@@ -213,6 +217,7 @@ class Bridge:
         self._server: asyncio.AbstractServer | None = None
         self._closing = False
         self.on_server_request = self.refuse_server_request
+        self.sweeps = []  # async () -> None, run after every reconcile pass (approval reminders)
         self.ops = {
             "ping": self.op_ping,
             "start": self.op_start,
@@ -245,6 +250,7 @@ class Bridge:
             "unknown_frame": self.on_child_unknown_frame,
             "exited": self.on_child_exited,
         }
+        self.approvals = approvals_mod.install(self)
         peers.install(self)
 
     # --- lifecycle ---------------------------------------------------------------
@@ -320,13 +326,30 @@ class Bridge:
                                 known_threads=self.state.threads.keys(), table=self._process_table)
 
     async def dispatch(self, op: str, args: dict, caller: Caller):
+        if op == "notify" and caller.kind == "claude":
+            raise IpcError("usage", "a Claude Code session subscribes natively: use SendMessage with notify_when_idle")
         handler = self.ops.get(op)
         if handler is None:
             raise IpcError("unknown_op", f"unknown op {op!r}")
         try:
+            self._check_ownership(op, args, caller)
             return await handler(args, caller)
         except KeyError as e:
             raise IpcError("usage", f"{op} needs argument {e.args[0]!r}") from e
+
+    def _check_ownership(self, op: str, args: dict, caller: Caller) -> None:
+        """The ownership rule: a caller drives, stops and approves what it spawned; a
+        Claude session or a human may do so to any thread."""
+        if op not in OWNED_OPS or (op in ("status", "name") and not args.get("target")):
+            return
+        if op in ("approve", "deny"):
+            thread, _ = self.approvals.find(args["token"])
+        else:
+            thread = self.resolve(args["target"])
+        # A Codex thread renaming itself is not acting on another caller's thread.
+        spawner = None if op == "name" and thread.thread_id == caller.codex_thread else thread.spawner
+        if not callers.permits(caller, op, spawner):
+            raise IpcError("forbidden", callers.forbidden_message(caller, op, spawner))
 
     def live_records(self) -> list[registry.Record]:
         return registry.live_records(self.sessions_dir)
@@ -541,6 +564,8 @@ class Bridge:
                 log.exception("reconcile failed; the next pass starts over")
             self.last_reconcile = time.time()
             self.save()
+        for sweep in self.sweeps:
+            await sweep()
 
     async def _reconcile_with(self, d: Daemon) -> None:
         loaded = set(await d.loaded_list())
@@ -785,12 +810,18 @@ class Bridge:
             return False
         return True
 
-    async def _deliver_into(self, thread: ThreadState, text: str):
-        """Steer or start a turn on a hosted thread, resuming it first if it was unloaded."""
+    async def ensure_loaded(self, thread: ThreadState) -> Daemon:
+        """The daemon connection, with `thread` resumed first if it was unloaded."""
         d = await self._require_daemon()
         if thread.status == "unloaded":
-            await d.thread_resume(thread.thread_id)
+            result = await d.thread_resume(thread.thread_id)
             self.subscribed[thread.thread_id] = d.epoch
+            self._set_status(thread, _status_of(result["thread"]))
+        return d
+
+    async def _deliver_into(self, thread: ThreadState, text: str):
+        """Steer or start a turn on a hosted thread, resuming it first if it was unloaded."""
+        d = await self.ensure_loaded(thread)
         effort = None if thread.effort_sent else thread.effort
         delivery = await deliver(d, thread.thread_id, text, self._sandbox_policy(thread), effort)
         if delivery.kind == "started":
@@ -954,7 +985,7 @@ class Bridge:
         t = self.resolve(target)
         return {
             "name": t.name, "thread_id": t.thread_id, "cwd": t.cwd, "origin": t.origin, "spawner": t.spawner,
-            "status": t.status, "active_turn_id": t.active_turn_id, "pending": t.pending, "last_error": t.last_error,
+            "status": t.status, "active_turn_id": t.active_turn_id, "pending": self.approvals.labels(t), "last_error": t.last_error,
             "final": t.final, "outcome": t.outcome, "read_only": t.read_only, "child_pid": t.child_pid,
             "worktree": t.worktree,
             "sub_agents": [{"thread_id": s.thread_id, "nickname": s.nickname, "role": s.role, "status": s.status} for s in t.sub_agents.values()],
@@ -971,7 +1002,7 @@ class Bridge:
                 "cwd": record.data.get("cwd"), "self": caller.kind == "claude" and record.data.get("sessionId") == caller.claude_session_id,
             })
         for thread in self.state.threads.values():
-            rows.append({"name": thread.name, "kind": "codex", "status": thread.status, "cwd": thread.cwd,
+            rows.append({"name": thread.name, "kind": "codex", "status": self.approvals.status_label(thread), "cwd": thread.cwd,
                          "self": caller.codex_thread == thread.thread_id, "thread_id": thread.thread_id})
             for sub in thread.sub_agents.values():
                 rows.append({"name": sub.nickname or sub.thread_id[:8], "kind": "codex-agent", "status": sub.status,

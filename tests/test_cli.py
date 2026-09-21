@@ -270,6 +270,32 @@ def test_exit_codes_follow_the_error_kind(rig, capsys):
     assert rig.run("wait", "helper", "--timeout", "0.2", capsys=capsys)[0] == 4
 
 
+DENIED = load_fixture("auto-review-denied.jsonl")
+REVIEW_STARTED = DENIED.notifications("item/autoApprovalReview/started")[0]
+REVIEW_DENIED = DENIED.notifications("item/autoApprovalReview/completed")[0]
+DENIED_TOKEN = "e16d64"  # sha256 of the captured reviewId, first 6 hex chars
+
+
+def test_approve_and_deny_verbs_answer_a_denial_and_an_unknown_token_exits_2(rig, capsys):
+    rig.daemon.replies["thread/approveGuardianDeniedAction"] = {"result": {}}
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    rig.daemon.notify("item/autoApprovalReview/started", for_thread(REVIEW_STARTED))
+    rig.daemon.notify("item/autoApprovalReview/completed", for_thread(REVIEW_DENIED))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and f"denied {DENIED_TOKEN}" not in rig.run("status", "helper", capsys=capsys)[1]:
+        time.sleep(0.05)
+    code, out, err = rig.run("ls", capsys=capsys)
+    assert code == 0 and f"denied {DENIED_TOKEN} " in out
+    code, out, err = rig.run("deny", "nope00", "--", "no", capsys=capsys)
+    assert code == 2 and "nope00" in err
+    code, out, err = rig.run("approve", DENIED_TOKEN, capsys=capsys)
+    assert (code, out) == (0, f"approved {DENIED_TOKEN} on helper: {REVIEW_DENIED['action']['command']}\n")
+    assert rig.daemon.wait_request("thread/approveGuardianDeniedAction")["params"]["threadId"] == THREAD_ID
+    assert "retry it now" in rig.daemon.wait_request("turn/start")["params"]["input"][0]["text"]
+    code, out, err = rig.run("deny", DENIED_TOKEN, "--", "already", "done", capsys=capsys)
+    assert code == 2 and "already resolved" in err
+
+
 def test_interrupt_reports_a_noop_when_the_thread_is_idle(rig, capsys):
     assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
     code, out, err = rig.run("interrupt", "helper", capsys=capsys)
@@ -535,6 +561,20 @@ def test_every_op_carries_the_callers_claimed_thread(rig, monkeypatch, capsys):
     monkeypatch.setattr(ipc, "call_raw", recording)
     assert rig.run("ls", capsys=capsys)[0] == 0
     assert seen[-1] == ("ls", "01a0c390-e298-7b53-87d2-3333c99c6ac4")
+
+
+def test_a_codex_caller_is_refused_by_the_cli_with_exit_2(rig):
+    assert rig.run_subprocess("start", "-n", "helper", "-C", str(rig.tmp)).returncode == 0
+    # The bridge classifies callers by the command name of their ancestors: a shell
+    # copied to a file named `codex` makes the CLI it runs a Codex caller.
+    codex = rig.tmp / "codexbin" / "codex"
+    codex.parent.mkdir()
+    codex.write_bytes(Path(os.path.realpath("/bin/sh")).read_bytes())
+    codex.chmod(0o755)
+    done = subprocess.run([str(codex), "-c", f"{sys.executable} -m antiphon stop helper"], capture_output=True, text=True)
+    assert done.returncode == 2, done.stderr
+    assert "codex caller" in done.stderr and "may not stop" in done.stderr
+    assert rig.run_subprocess("stop", "helper").returncode == 0
 
 
 def test_ping_shows_both_versions_and_the_peer_count(rig, capsys):

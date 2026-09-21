@@ -266,6 +266,18 @@ def verb_notify(args, client: Client) -> int:
     return 0
 
 
+def verb_approve(args, client: Client) -> int:
+    result = client.call("approve", {"token": args.token})
+    print(f"approved {result['token']} on {result['name']}: {result['command']}")
+    return 0
+
+
+def verb_deny(args, client: Client) -> int:
+    result = client.call("deny", {"token": args.token, "why": " ".join(args.why)})
+    print(f"denied {result['token']} on {result['name']}: {result['command']}")
+    return 0
+
+
 VERBS = {
     "ping": verb_ping,
     "start": verb_start,
@@ -279,6 +291,8 @@ VERBS = {
     "name": verb_name,
     "attach": verb_attach,
     "notify": verb_notify,
+    "approve": verb_approve,
+    "deny": verb_deny,
 }
 
 
@@ -324,6 +338,10 @@ def build_parser() -> argparse.ArgumentParser:
     attach.add_argument("target")
     notify = sub.add_parser("notify", help="from inside a Codex thread: be messaged when a peer's turn ends")
     notify.add_argument("target")
+    sub.add_parser("approve", help="approve an escalation by its token (see the message or `ls`)").add_argument("token")
+    deny = sub.add_parser("deny", help="deny an escalation by its token, telling the thread why")
+    deny.add_argument("token")
+    deny.add_argument("why", nargs="+")
     return parser
 
 

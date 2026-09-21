@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from antiphon import cli
 from antiphon.bridge import Bridge
 from antiphon.callers import Caller
 from fake_claude import FakeClaude, captured_frames
@@ -181,3 +182,59 @@ def test_a_failed_turn_reports_the_failure_and_no_report_skips_the_message(short
     assert notice["action"] == "peer_idle_notice"
     assert notice["detail"].startswith("failed: You’ve hit your usage limit")
     assert more == frames
+
+
+# --- approvals: the escalation reaches Claude, the CLI answers it ---------------------
+
+DENIED = load_fixture("auto-review-denied.jsonl")
+REVIEW_STARTED = DENIED.notifications("item/autoApprovalReview/started")[0]
+REVIEW_DENIED = DENIED.notifications("item/autoApprovalReview/completed")[0]
+OVERRIDE_EVENT = [m for m in load_fixture("guardian-override.jsonl").sent if m.get("method") == "thread/approveGuardianDeniedAction"][0]["params"]["event"]
+REQUEST_PARAMS = APPROVAL.server_requests("item/commandExecution/requestApproval")[0]["params"]
+DENIED_COMMAND = REVIEW_DENIED["action"]["command"]
+
+
+async def cli_in_thread(rig: Rig, monkeypatch, *argv: str) -> int:
+    """The real CLI against the rig's in-process bridge, from a thread so the bridge's loop keeps serving."""
+    monkeypatch.setenv("ANTIPHON_HOME", str(rig.home))
+    return await asyncio.to_thread(cli.main, list(argv))
+
+
+def test_a_denied_review_reaches_claude_and_cli_approve_records_the_override_then_the_retry(short_tmp, monkeypatch):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/approveGuardianDeniedAction"] = {"result": {}}
+            await rig.start_thread()
+            await rig.fake.notify("item/autoApprovalReview/started", for_thread(REVIEW_STARTED))
+            await rig.fake.notify("item/autoApprovalReview/completed", for_thread(REVIEW_DENIED))
+            [frame] = await rig.frames(1, timeout=5.0)
+            token = frame["message"]["content"].split("(token ", 1)[1][:6]
+            code = await cli_in_thread(rig, monkeypatch, "approve", token)
+            override = await asyncio.wait_for(rig.fake.wait_request("thread/approveGuardianDeniedAction"), 5)
+            retry = await asyncio.wait_for(rig.fake.wait_request("turn/start"), 5)
+            return frame["message"]["content"], token, code, override["params"], retry["params"]["input"][0]["text"]
+
+    content, token, code, override, retry = run(body())
+    assert DENIED_COMMAND in content
+    assert f"antiphon approve {token}" in content and f"antiphon deny {token} -- <why>" in content
+    assert code == 0
+    assert override == {"threadId": THREAD_ID, "event": OVERRIDE_EVENT}
+    assert json.dumps(override["event"]) == json.dumps(OVERRIDE_EVENT)
+    assert "retry it now" in retry and DENIED_COMMAND in retry
+
+
+def test_a_blocking_request_reaches_claude_and_cli_approve_answers_accept(short_tmp, monkeypatch):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(review_by_parent=True)
+            request_id = await rig.fake.server_request("item/commandExecution/requestApproval", for_thread(REQUEST_PARAMS))
+            [frame] = await rig.frames(1, timeout=5.0)
+            token = frame["message"]["content"].split("(token ", 1)[1][:6]
+            code = await cli_in_thread(rig, monkeypatch, "approve", token)
+            answer = await asyncio.wait_for(rig.fake.response(request_id), 5)
+            return frame["message"]["content"], code, request_id, answer
+
+    content, code, request_id, answer = run(body())
+    assert REQUEST_PARAMS["command"] in content and "The turn is blocked until you answer" in content
+    assert code == 0
+    assert answer == {"jsonrpc": "2.0", "id": request_id, "result": {"decision": "accept"}}
