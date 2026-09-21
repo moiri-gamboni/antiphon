@@ -338,6 +338,28 @@ def test_a_request_from_a_dropped_connection_is_retired_at_the_reconnect_interru
     assert not statuses[0].startswith("approval")
 
 
+def test_lost_survives_a_transport_error_during_its_interrupt(short_tmp):
+    from antiphon.codex.ws import TransportClosed
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(review_by_parent=True)
+            request_id, token = await blocked(rig)
+            thread, record = rig.bridge.approvals.find(token)
+            thread.active_turn_id = record.turn_id
+
+            async def boom(*args, **kwargs):
+                raise TransportClosed("connection lost")
+
+            rig.bridge.daemon.turn_interrupt = boom
+            # _lost is best-effort; a transport failure interrupting the lost turn must not
+            # escape (it would end the reconcile loop that calls the sweep).
+            await rig.bridge.approvals._lost(thread, record, rig.bridge.daemon)
+            return rig.bridge.state.threads[THREAD_ID].pending[0]["resolved"]
+
+    assert run(body()) is True
+
+
 def test_a_lost_request_whose_turn_already_ended_interrupts_nothing(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

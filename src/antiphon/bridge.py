@@ -418,18 +418,24 @@ class Bridge:
                 log.exception("connecting to the daemon failed; retrying in %s s", delay)
             else:
                 delay = self.reconnect_backoff[0]
-                self.codex_failures.pop("initialize", None)
-                self._watch_pinned_methods(d)
-                self.daemon = d
-                self.connected_once = True
-                self.subscribed.clear()
-                self._update_degraded()
-                log.info("connected to the Codex daemon (epoch %s, codex %s)", d.epoch, d.codex_version)
-                self._spawn(self.reconcile(), "antiphon-reconcile-on-connect")
-                await d.closed.wait()
-                log.warning("daemon connection closed: %r", d.close_reason)
-                self.daemon = None
-                await d.close()
+                try:
+                    self.codex_failures.pop("initialize", None)
+                    self._watch_pinned_methods(d)
+                    self.daemon = d
+                    self.connected_once = True
+                    self.subscribed.clear()
+                    self._update_degraded()
+                    log.info("connected to the Codex daemon (epoch %s, codex %s)", d.epoch, d.codex_version)
+                    self._spawn(self.reconcile(), "antiphon-reconcile-on-connect")
+                    await d.closed.wait()
+                    log.warning("daemon connection closed: %r", d.close_reason)
+                except Exception:
+                    # A failure setting up or serving the connection must not end the loop:
+                    # drop this connection and reconnect, as a bridge that stops is worse.
+                    log.exception("the daemon session ended unexpectedly; reconnecting")
+                finally:
+                    self.daemon = None
+                    await d.close()
                 continue
             await asyncio.sleep(delay)
             delay = min(delay * 2, self.reconnect_backoff[1])
@@ -576,7 +582,12 @@ class Bridge:
     async def _reconcile_loop(self) -> None:
         while not self._closing:
             await asyncio.sleep(self.reconcile_interval)
-            await self.reconcile()
+            try:
+                await self.reconcile()
+            except Exception:
+                # A bridge that stops reconciling looks alive but slowly goes deaf
+                # (no adoption, no peer respawn, no approval reminders); log and keep going.
+                log.exception("reconcile pass failed; the next one runs on schedule")
 
     async def reconcile(self) -> None:
         async with self._reconcile_lock:

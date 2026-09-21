@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from antiphon.callers import Caller
 from antiphon.codex.daemon import Daemon, DaemonError
+from antiphon.codex.ws import TransportClosed
 from antiphon.ipc import IpcError
 from antiphon.state import ThreadState
 
@@ -316,7 +317,9 @@ class Approvals:
             try:
                 await d.turn_interrupt(thread.thread_id, record.turn_id)
                 interrupted = True
-            except DaemonError as e:
+            except (DaemonError, TransportClosed, TimeoutError) as e:
+                # Best-effort: the turn may be over, or the fresh connection may flap again;
+                # either way the record is already resolved and the loop must not die here.
                 log.info("interrupt after a lost approval on %s refused (turn probably over): %r", thread.name, e)
         outcome = "the turn was interrupted" if interrupted else "that turn is over"
         text = (

@@ -439,6 +439,58 @@ def test_daemon_reconnect_resubscribes_every_hosted_thread_on_a_new_epoch(short_
     assert connections == 2
 
 
+def test_a_raising_sweep_does_not_kill_the_reconcile_loop(short_tmp):
+    async def body():
+        rig = Rig(short_tmp)
+        rig.bridge.reconcile_interval = 0.02
+        calls = []
+
+        async def bad_sweep():
+            calls.append(True)
+            raise RuntimeError("sweep boom")
+
+        rig.bridge.sweeps.append(bad_sweep)
+        task = asyncio.create_task(rig.bridge._reconcile_loop())
+        try:
+            await until(lambda: len(calls) >= 3, timeout=3)
+        finally:
+            rig.bridge._closing = True
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return len(calls)
+
+    assert run(body()) >= 3
+
+
+def test_a_raising_post_connect_step_does_not_kill_the_connect_loop(short_tmp):
+    async def body():
+        rig = Rig(short_tmp)
+        calls = []
+        real = rig.bridge._update_degraded
+
+        def flaky():
+            calls.append(True)
+            if len(calls) == 1:
+                raise RuntimeError("degraded write boom")
+            return real()
+
+        rig.bridge._update_degraded = flaky
+        await rig.fake.start()
+        await rig.bridge.start()
+        try:
+            await until(lambda: rig.bridge.daemon is not None and len(calls) >= 2, timeout=5)
+            return rig.bridge.connected_once, rig.bridge.daemon is not None
+        finally:
+            await rig.bridge.close()
+            await rig.fake.stop()
+
+    connected_once, has_daemon = run(body())
+    assert connected_once and has_daemon
+
+
 def test_ping_right_after_start_waits_for_the_first_daemon_connection(short_tmp):
     async def body():
         rig = Rig(short_tmp)
