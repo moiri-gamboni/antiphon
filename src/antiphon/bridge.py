@@ -363,7 +363,12 @@ class Bridge:
         if missing is not None:
             raise IpcError("usage", f"{op} needs argument {missing!r}")
         self._check_ownership(op, args, caller)
-        return await handler(args, caller)
+        try:
+            return await handler(args, caller)
+        except (TransportClosed, TimeoutError, DaemonUnavailable) as e:
+            # The connection failed mid-op (a daemon restart or upgrade); a calling agent
+            # retries on exit 5, so map it to daemon_unreachable instead of an internal error.
+            raise IpcError("daemon_unreachable", f"the Codex daemon is unreachable ({op}): {e!r}; the bridge is reconnecting") from e
 
     def _check_ownership(self, op: str, args: dict, caller: Caller) -> None:
         """The ownership rule: a caller drives, stops and approves what it spawned; a
@@ -940,7 +945,7 @@ class Bridge:
             try:
                 result = await d.thread_start(cwd, name, args["read_only"], args.get("model"), args["review_by_parent"])
             except DaemonError as e:
-                raise IpcError("daemon", f"thread/start failed: {e.error.get('message')}", e.error) from e
+                raise IpcError("precondition", f"thread/start failed: {e.error.get('message')}", e.error) from e
             thread_id = result["thread"]["id"]
             thread = ThreadState(
                 thread_id=thread_id, name=name, cwd=cwd, origin="spawned", spawner=caller.owner_id,
@@ -999,7 +1004,7 @@ class Bridge:
             # The turn may have ended between our last notification and this call.
             if await d.active_turn(thread.thread_id) is None:
                 return {"noop": "idle"}
-            raise IpcError("daemon", f"turn/interrupt failed: {e.error.get('message')}", e.error) from e
+            raise IpcError("precondition", f"turn/interrupt failed: {e.error.get('message')}", e.error) from e
         return {"turn_id": turn_id}
 
     async def op_wait(self, args: dict, caller: Caller) -> dict:
@@ -1113,7 +1118,7 @@ class Bridge:
         try:
             await d.set_name(thread.thread_id, name)
         except DaemonError as e:
-            raise IpcError("daemon", f"thread/name/set failed: {e.error.get('message')}", e.error) from e
+            raise IpcError("precondition", f"thread/name/set failed: {e.error.get('message')}", e.error) from e
         thread.name = name
         await self._child_rename(thread)
         self.save()

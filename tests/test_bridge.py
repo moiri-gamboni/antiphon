@@ -262,6 +262,43 @@ def test_send_by_thread_id_prefix_and_ambiguity_lists_candidates(short_tmp):
     assert missing.kind == "unknown_target"
 
 
+def test_a_refused_thread_start_is_a_precondition_not_a_daemon_error(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/start"] = {"error": {"code": -32600, "message": "no such model"}}
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.start_thread()
+            return info.value
+
+    error = run(body())
+    assert error.kind == "precondition"
+    assert "no such model" in error.message
+
+
+def test_a_transport_failure_during_an_op_is_daemon_unreachable(short_tmp):
+    from antiphon.codex.daemon import Daemon
+
+    async def noop(*args):
+        pass
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            rig.bridge._closing = True
+            await rig.fake.drop()
+            await until(lambda: rig.bridge.daemon is None)
+            dead = await Daemon.connect(str(rig.daemon_sock), noop, noop)
+            await rig.fake.drop()
+            await asyncio.wait_for(dead.closed.wait(), 2)
+            rig.bridge.daemon = dead
+            rig.bridge.subscribed[THREAD_ID] = dead.epoch
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.bridge.dispatch("send", {"target": "helper", "text": "x"}, HUMAN)
+            return info.value.kind
+
+    assert run(body()) == "daemon_unreachable"
+
+
 def test_a_rejected_turn_start_is_a_delivery_error_with_the_daemons_message(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

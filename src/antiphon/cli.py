@@ -42,7 +42,6 @@ EXIT_CODES = {
     "delivery_rejected": 3,
     "timeout": 4,
     "daemon_unreachable": 5,
-    "daemon": 5,
 }
 
 
