@@ -328,6 +328,37 @@ def test_every_op_carries_the_callers_claimed_thread(rig, monkeypatch, capsys):
     assert seen[-1] == ("ls", "01a0c390-e298-7b53-87d2-3333c99c6ac4")
 
 
+def test_ping_shows_both_versions_and_the_peer_count(rig, capsys):
+    claude = FakeClaude(rig.config_dir / "sessions", rig.tmp / "socks", name="claude-main")
+    try:
+        assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+        code, out, err = rig.run("ping", capsys=capsys)
+    finally:
+        claude.close()
+    assert code == 0
+    assert out == "bridge ok · codex 0.155.1 · claude 2.1.278 · peers 1\n"
+
+
+def test_every_verb_prints_the_degraded_banner_and_ping_exits_2(rig, capsys):
+    claude = FakeClaude(rig.config_dir / "sessions", rig.tmp / "socks", name="claude-main")
+    try:
+        assert rig.run("ping", capsys=capsys)[0] == 0
+        broken = dict(claude.record, name="claude-old", peerProtocol=0)
+        (rig.config_dir / "sessions" / "claude-old.json").write_text(json.dumps(broken))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and rig.run("ping", capsys=capsys)[0] == 0:
+            time.sleep(0.2)
+        code, out, err = rig.run("ping", capsys=capsys)
+        ls_code, ls_out, ls_err = rig.run("ls", capsys=capsys)
+    finally:
+        claude.close()
+    assert code == 2
+    assert out.startswith("bridge DEGRADED\n") and "peerProtocol" in out
+    assert err.startswith("antiphon: DEGRADED — ") and "claude-old.json" in err
+    assert ls_code == 0
+    assert ls_err.startswith("antiphon: DEGRADED — ")
+
+
 def test_the_bridge_subcommand_runs_in_the_foreground_and_yields_to_a_running_bridge(rig, capsys):
     assert rig.run("ping", capsys=capsys)[0] == 0
     done = rig.run_subprocess("bridge")

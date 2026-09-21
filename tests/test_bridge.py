@@ -12,7 +12,7 @@ import pytest
 from antiphon import ipc
 from antiphon.bridge import AlreadyRunning, Bridge
 from antiphon.callers import Caller
-from fake_claude import FakeClaude
+from fake_claude import FakeClaude, captured_frames, send_frame
 from fake_daemon import FakeDaemon, load_fixture
 
 THREAD_START = load_fixture("thread-start.jsonl")
@@ -823,3 +823,134 @@ def test_a_child_that_dies_is_forgotten_and_respawned_on_the_next_reconcile(shor
 
     first, second = run(body())
     assert first is not None and second is not None and first != second
+
+
+# --- degradation pins ---------------------------------------------------------------
+
+
+def broken_record(sessions_dir: Path, name: str, **changes) -> Path:
+    """A second live record (this process again) with one departure from the expected shape."""
+    base = json.loads(next(sessions_dir.glob("*.json")).read_text())
+    record = {**base, "name": name, **{k: v for k, v in changes.items() if v is not None}}
+    for key, value in changes.items():
+        if value is None:
+            record.pop(key, None)
+    path = sessions_dir / f"{name}.json"
+    path.write_text(json.dumps(record))
+    return path
+
+
+def test_a_record_missing_a_required_field_degrades_the_bridge_until_a_clean_pass(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread(name="first")
+                first_child = rig.bridge.state.threads[THREAD_ID].child_pid
+                bad = broken_record(rig.sessions_dir, "claude-broken", pidDomain=None)
+                await rig.bridge.reconcile()
+                degraded = list(rig.bridge.state.degraded)
+                ping = await rig.bridge.dispatch("ping", {}, HUMAN)
+                second = json.loads(json.dumps(THREAD_START.result(2)).replace(THREAD_ID, "01a0c390-0000-7000-8000-000000000002"))
+                rig.fake.replies["thread/start"] = {"result": second}
+                await rig.start_thread(name="second")
+                second_child = rig.bridge.state.threads["01a0c390-0000-7000-8000-000000000002"].child_pid
+                first_alive = rig.bridge.state.threads[THREAD_ID].child_pid == first_child and THREAD_ID in rig.bridge.children
+                bad.unlink()
+                await rig.bridge.reconcile()
+                return degraded, ping, second_child, first_alive, rig.bridge.state.degraded, rig.bridge.state.threads["01a0c390-0000-7000-8000-000000000002"].child_pid
+            finally:
+                claude.close()
+
+    degraded, ping, second_child, first_alive, cleared, registered_later = run(body())
+    assert len(degraded) == 1
+    assert "pidDomain" in degraded[0] and "claude-broken.json" in degraded[0]
+    assert ping["degraded"] == degraded
+    assert second_child is None
+    assert first_alive is True
+    assert cleared == []
+    assert registered_later is not None
+
+
+def test_a_wrong_protocol_number_is_a_degraded_reason(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                broken_record(rig.sessions_dir, "claude-v2", peerProtocol=2)
+                await rig.bridge.reconcile()
+                return rig.bridge.state.degraded
+            finally:
+                claude.close()
+
+    [reason] = run(body())
+    assert "peerProtocol" in reason and "2" in reason
+
+
+def test_a_record_whose_process_vanishes_during_the_pass_is_skipped_not_a_failure(short_tmp, monkeypatch):
+    from antiphon import bridge as bridge_mod
+
+    calls = []
+    real = bridge_mod.registry.pins_ok
+
+    def flaky(record, proc_root="/proc"):
+        calls.append(record.path.name)
+        if record.path.name == "claude-vanishing.json":
+            raise FileNotFoundError(f"/proc/{record.pid}/stat")
+        return real(record, proc_root)
+
+    monkeypatch.setattr(bridge_mod.registry, "pins_ok", flaky)
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                broken_record(rig.sessions_dir, "claude-vanishing")
+                await rig.bridge.reconcile()
+                return rig.bridge.state.degraded
+            finally:
+                claude.close()
+
+    assert run(body()) == []
+    assert "claude-vanishing.json" in calls
+
+
+def test_method_not_found_on_a_pinned_method_degrades_with_the_method_name(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/turns/list"] = turns_list(TURN_STARTED["turn"])
+            rig.fake.replies["turn/steer"] = {"error": {"code": -32601, "message": "Method not found"}}
+            rig.fake.replies["turn/start"] = {"result": TURN_STARTED}
+            await rig.start_thread()
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "x"}, HUMAN)
+            degraded = list(rig.bridge.state.degraded)
+            rig.fake.replies["turn/steer"] = {"result": STEERED}
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "y"}, HUMAN)
+            return degraded, rig.bridge.state.degraded
+
+    degraded, after = run(body())
+    assert degraded == ["codex protocol: turn/steer unsupported"]
+    assert after == []
+
+
+def test_an_unknown_frame_is_logged_once_per_action(short_tmp, caplog):
+    probe = [f for f in captured_frames("peer-frames.jsonl", "frame") if f.get("action") == "sandbox_probe"][0]
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread()
+                sock = str(short_tmp / "socks" / f"{rig.bridge.state.threads[THREAD_ID].child_pid}.sock")
+                with caplog.at_level(logging.WARNING, logger="antiphon.bridge"):
+                    for _ in range(2):
+                        await asyncio.to_thread(send_frame, sock, probe)
+                    await asyncio.to_thread(send_frame, sock, {**probe, "action": "other_probe"})
+                    await asyncio.sleep(0.5)
+            finally:
+                claude.close()
+
+    run(body())
+    warnings = [r.getMessage() for r in caplog.records if "unknown frame" in r.getMessage()]
+    assert len([w for w in warnings if "sandbox_probe" in w]) == 1
+    assert len([w for w in warnings if "other_probe" in w]) == 1

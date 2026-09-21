@@ -201,6 +201,7 @@ class Bridge:
         self.subscribed: dict[str, int] = {}  # thread id -> the epoch it was resumed on
         self.pin_failures: list[str] = []
         self.codex_failures: dict[str, str] = {}
+        self._unknown_actions: set[str] = set()
         self._turn_waiters: dict[str, list[asyncio.Future]] = {}
         self.last_reconcile: float | None = None
         self._reconcile_lock = asyncio.Lock()
@@ -266,7 +267,8 @@ class Bridge:
 
     async def close(self) -> None:
         self._closing = True
-        for child in list(self.children.values()):
+        children, self.children = self.children, {}
+        for child in children.values():
             await child.close()
         for task in list(self._tasks):
             task.cancel()
@@ -500,6 +502,7 @@ class Bridge:
 
     async def reconcile(self) -> None:
         async with self._reconcile_lock:
+            self._check_pins()
             d = self.daemon
             if d is None:
                 return
@@ -577,6 +580,23 @@ class Bridge:
             else:
                 log.info("ignoring sub-agent %s of unknown thread %s", thread["id"], parent_id)
 
+    def _check_pins(self) -> None:
+        """Compare every live Claude record with the shape this bridge was written against;
+        any departure makes the bridge degraded until a pass finds them all clean."""
+        failures = []
+        for record in self.live_records():
+            try:
+                failures.extend(registry.pins_ok(record))
+            except FileNotFoundError:
+                continue  # the session exited between the listing and the process read
+        if failures != self.pin_failures:
+            for failure in failures:
+                log.error("Claude Code peer protocol pin failed: %s", failure)
+            if not failures:
+                log.info("Claude Code peer protocol pins clean again")
+        self.pin_failures = failures
+        self._update_degraded()
+
     async def _retire(self, thread: ThreadState) -> None:
         await self._child_exited(thread)
         self.state.threads.pop(thread.thread_id, None)
@@ -589,6 +609,7 @@ class Bridge:
         live Claude session exists to copy the record shape from and no pin has failed."""
         if thread.thread_id in self.children:
             return
+        self._check_pins()
         if self.pin_failures:
             log.info("not registering %s while degraded: %s", thread.name, "; ".join(self.pin_failures))
             return
@@ -667,7 +688,17 @@ class Bridge:
         log.info("peer child of %s: %s", thread_id, event)
 
     async def on_child_unknown_frame(self, thread_id: str, event: dict) -> None:
-        log.warning("unknown frame on the peer socket of %s: %s", thread_id, event.get("raw"))
+        """A frame shape this bridge does not speak: logged with its bytes once per action,
+        so a Claude Code change shows up in the log without flooding it."""
+        raw = event.get("raw")
+        try:
+            action = str(json.loads(raw).get("action"))
+        except (ValueError, TypeError, AttributeError):
+            action = "<not a JSON object>"
+        if action in self._unknown_actions:
+            return
+        self._unknown_actions.add(action)
+        log.warning("unknown frame (action %s) on the peer socket of %s: %s", action, thread_id, raw)
 
     async def on_child_exited(self, thread_id: str, event: dict) -> None:
         # A child the bridge closed itself was forgotten before the exit; anything
@@ -749,6 +780,7 @@ class Bridge:
     # --- ops ---------------------------------------------------------------------------------
 
     async def op_ping(self, args: dict, caller: Caller) -> dict:
+        self._check_pins()
         claude_versions = [r.data["version"] for r in self.live_records() if "version" in r.data]
         return {
             "pid": os.getpid(),
