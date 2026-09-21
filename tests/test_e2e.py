@@ -201,6 +201,26 @@ def test_turn_completed_reports_the_final_answer_to_the_spawner_then_the_idle_no
     assert notice["orig_msg_id"] == CAPTURED_NOTIFY["msg_id"]
 
 
+def test_a_final_answer_over_64_kib_reaches_the_spawner_whole(short_tmp):
+    big = "A" * 100_000  # past the 64 KiB default line limit of the IPC and child pipes
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, rig.caller)
+            notice = for_thread(COMPLETED_NOTICE)
+            for item in notice["turn"]["items"]:
+                if item.get("type") == "agentMessage":
+                    item["text"] = big
+            await rig.fake.notify("turn/completed", notice)
+            [report] = await rig.frames(1, timeout=5.0)
+            return report
+
+    report = run(body())
+    assert report["type"] == "user"
+    assert big in report["message"]["content"]
+
+
 def test_a_failed_turn_reports_the_failure_and_no_report_skips_the_message(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

@@ -165,6 +165,19 @@ def test_call_raises_bridge_unreachable_when_the_server_closes_without_replying(
     run(body())
 
 
+def test_a_payload_larger_than_the_default_line_limit_round_trips(tmp_path):
+    async def body():
+        async with Served(tmp_path) as s:
+            big = "z" * 500_000  # well past asyncio's 64 KiB default line limit
+            s.results["ping"] = {"echo": big}
+            result = await asyncio.to_thread(ipc.call, s.path, "ping", {"blob": big})
+            return result, s.calls[0][1]
+
+    result, args = run(body())
+    assert result == {"echo": "z" * 500_000}
+    assert args["blob"] == "z" * 500_000
+
+
 def test_the_socket_is_private_to_the_user(tmp_path):
     async def body():
         async with Served(tmp_path) as s:

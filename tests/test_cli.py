@@ -331,11 +331,17 @@ def test_ls_prints_an_aligned_table_with_a_star_on_the_callers_row(rig):
     lines = done.stdout.splitlines()
     assert lines[0] == "you are claude-main"
     assert lines[1].split() == ["NAME", "KIND", "STATUS", "CWD"]
-    rows = {line.split()[1] if line.startswith("*") else line.split()[0]: line for line in lines[2:]}
-    assert rows["claude-main"].startswith("* claude-main")
-    assert not rows["helper"].startswith("*")
-    assert rows["helper"].split() == ["helper", "codex", "idle", str(rig.tmp)]
-    name_col = [line.index("claude") for line in lines[2:] if "claude-main" in line][0]
+    # Ordered rows, not a dict keyed by name: a hosted thread's own peer-child record
+    # slipping in as a second "helper" row (kind claude) must make this fail, not be
+    # collapsed away.
+    data_rows = lines[2:]
+    assert len(data_rows) == 2
+    names = [line.split()[1] if line.startswith("*") else line.split()[0] for line in data_rows]
+    assert names == ["claude-main", "helper"]
+    assert data_rows[0].startswith("* claude-main")
+    assert not data_rows[1].startswith("*")
+    assert data_rows[1].split() == ["helper", "codex", "idle", str(rig.tmp)]
+    name_col = [line.index("claude") for line in data_rows if "claude-main" in line][0]
     assert all(line[name_col - 1] == " " for line in lines[1:])
 
 
