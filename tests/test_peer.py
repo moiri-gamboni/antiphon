@@ -1,7 +1,9 @@
+import asyncio
 import json
 import os
 import queue
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -421,6 +423,27 @@ def test_exit_reaches_every_subscriber_when_the_bridge_and_one_subscriber_are_go
             proc.kill()
         proc.wait()
         claude.close()
+
+
+def test_send_to_a_peer_that_never_reads_times_out_and_reports_send_failed(short_tmp, monkeypatch):
+    from antiphon.claude import peer as peer_mod
+
+    monkeypatch.setattr(peer_mod, "SEND_TIMEOUT", 0.2)
+    hung = str(short_tmp / "hung.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(hung)
+    server.listen(1)  # accepts the connection into the backlog, but never reads it
+
+    async def body():
+        peer = peer_mod.Peer()
+        big = {"content": "y" * 2_000_000}
+        return await asyncio.wait_for(peer.send(hung, big, msg_id="m1"), 3)
+
+    try:
+        assert asyncio.run(body()) is False
+    finally:
+        server.close()
+        os.unlink(hung)
 
 
 def test_a_bad_command_still_notifies_and_cleans_up(child, claude):

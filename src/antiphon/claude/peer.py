@@ -50,6 +50,10 @@ log = logging.getLogger("antiphon.claude.peer")
 # longer, and a frame over the limit would be dropped (socket side) or fatal (stdin side).
 FRAME_LIMIT = 16 * 1024 * 1024
 
+# A peer that accepted the connection but stopped reading would block a large write forever
+# and the command loop with it; bound the whole connect+write+drain.
+SEND_TIMEOUT = 5.0
+
 WRAPPER = re.compile(
     r'\A<cross-session-message from="(?P<from>[^"]*)" from-name="(?P<name>[^"]*)"[^>]*>\n'
     r"(?P<text>.*)\n</cross-session-message>\Z",
@@ -230,14 +234,19 @@ class Peer:
     async def send(self, to_sock: str, frame: dict, **failure_fields: object) -> bool:
         line = json.dumps(frame)
         log.debug("to %s: %s", to_sock, line)
+        writer = None
         try:
-            _, writer = await asyncio.open_unix_connection(to_sock)
-            writer.write(line.encode() + b"\n")
-            await writer.drain()
+            async with asyncio.timeout(SEND_TIMEOUT):
+                _, writer = await asyncio.open_unix_connection(to_sock)
+                writer.write(line.encode() + b"\n")
+                await writer.drain()
             writer.close()
-        except OSError as e:
+        except (OSError, TimeoutError) as e:
             # The peer's socket is gone or refusing (its session exited while its record
-            # lingered): the bridge is told and this peer stays up for its other peers.
+            # lingered), or it accepted but stopped reading: the bridge is told and this peer
+            # stays up for its other peers. Abort so the buffered bytes do not keep it alive.
+            if writer is not None:
+                writer.transport.abort()
             log.error("could not send to %s: %r", to_sock, e)
             self.emit(ev="send_failed", to_sock=to_sock, reason=repr(e), **failure_fields)
             return False
