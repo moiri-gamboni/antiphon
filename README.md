@@ -1,0 +1,178 @@
+# antiphon
+
+antiphon makes Claude Code sessions and OpenAI Codex CLI sessions peers of each other on one machine. A bridge process speaks Codex's app-server protocol on one side and Claude Code's cross-session peer protocol on the other; a small `antiphon` CLI talks to the bridge. From a Claude Code session, Codex threads appear in `ListAgents`, take `SendMessage`, honour `notify_when_idle`, and send their sandbox escalations back for a decision. From a Codex thread, `antiphon` lists the sessions on the machine, messages any of them, and subscribes to their idle notices. A human attaches a terminal to any thread, and a Codex TUI a human started is a peer too.
+
+## Requirements
+
+- Codex CLI 0.155 or later (the app-server daemon and `turn/steer`)
+- Claude Code 2.1.278 or later (peer protocol 1 with `notify_when_idle`)
+- Python 3.12 or later; no runtime dependencies beyond the standard library
+- Linux or macOS. Registration as a Claude Code peer on macOS is checked at runtime against a live session's record (the process-start pin below) and has no recorded fixture yet.
+- Optional: `tmux` for `attach`, `git` for `start --worktree`
+
+Claude Code's side of this is documented at https://code.claude.com/docs/en/cross-session-messaging (`ListAgents`, `SendMessage`, `notify_when_idle`, session names). The registry record and socket frame shapes are not documented, which is why the bridge pins them (see [Trust model](#trust-model) and [Troubleshooting](#troubleshooting)) and refuses to register peers when they drift.
+
+For Codex threads that use Codex's own sub-agents, set `[features] multi_agent_v2 = true` in `~/.codex/config.toml`.
+
+## Install
+
+```
+uv tool install .          # or: pipx install .
+./install.sh install       # skills + background service; --no-service skips the service
+```
+
+`install.sh install` symlinks `skills/claude` to `$CLAUDE_CONFIG_DIR/skills/antiphon` (default `~/.claude/skills/antiphon`) and `skills/codex` to `~/.agents/skills/antiphon`, and enables the bridge as a systemd user service (Linux) or a launchd agent (macOS) so it is always running; the CLI also starts a bridge on demand when none answers, so the service is the steady state and lazy start the safety net. `--human-approvals` adds the [approval prompt hook](#a-permission-prompt-for-approvals). `./install.sh uninstall` removes the skills, the service and the hook, and stops the bridge.
+
+State, socket and logs live under `~/.antiphon/` (`$ANTIPHON_HOME` overrides it): `bridge.sock`, `state.json`, `log/bridge.out`, `log/raw.jsonl`, `log/peer-<thread id prefix>.log`. The bridge reads Claude Code's registry from `$CLAUDE_CONFIG_DIR/sessions` (default `~/.claude/sessions`) and the Codex daemon socket from `$CODEX_HOME/app-server-control/app-server-control.sock` (default `~/.codex`).
+
+## The `antiphon` command
+
+Options go before the `--` separator; everything after it is the prompt or message text (`antiphon send helper --wait -- "go"`, never `-- "go" --wait`). Targets are a thread's name, or a unique prefix of its thread id. The default name of a thread is `codex-<directory name>`; a name already taken by a live session or thread gets `-2`, `-3` appended.
+
+| Verb | What it does | Exit codes beyond 0 |
+|---|---|---|
+| `ping` | Is the bridge up, and what does it speak to: `bridge ok · codex <version> · claude <version> · peers <n>` | 1 no bridge; 2 degraded (reasons listed); 5 Codex daemon unreachable |
+| `start [-C DIR] [-n NAME] [--read-only] [-m MODEL] [--effort LEVEL] [--no-report] [--worktree] [--review-by-parent] [--visible] [--wait] [--timeout S] [-- PROMPT]` | Starts a Codex thread in `DIR` (default: the current directory), idle until sent to unless a prompt follows `--`. `--worktree` gives it a git worktree beside the repository on branch `codex/NAME`; `--visible` attaches a terminal after starting; `--wait` waits for the prompt's turn | 2 precondition (`--worktree` outside a git repository, a branch that already exists); 5 daemon; with `--wait`: 4, 6 as `wait` |
+| `send TARGET [--wait] [--timeout S] -- TEXT` | Steers the target's running turn, or starts a turn if it is idle. From a Codex thread to a session it did not spawn: a labelled cross-session message instead | 2 unknown or stopped target (the message names `antiphon resume <id>`); 3 the daemon or the receiving session refused it; with `--wait`: 4, 6 |
+| `wait TARGET [--timeout S]` | Waits for the thread's turn to end (default 600 s) and prints its final answer, or `<status>: <error>` | 4 still busy at the timeout (the turn continues); 6 the turn failed or was interrupted; 1 the bridge went away twice (the message names the command to rerun) |
+| `interrupt TARGET` | Ends the current turn; prints `nothing to interrupt` when idle | 5 daemon |
+| `status [TARGET]` | The thread's state (status, active turn, last outcome, pending escalations, sub-agents, worktree), or the bridge's (daemon, connection epoch, thread count, degraded reasons) | 2 unknown target |
+| `ls` | Every peer on the machine: Claude Code sessions, Codex threads, and Codex sub-agents indented under their parent with their role. The first line names the caller when the caller is a peer; `*` marks its row | |
+| `stop TARGET` | Retires the thread as a peer: interrupts its turn, unsubscribes, removes its record. The transcript stays, and so does a `--worktree` branch; a clean worktree checkout is removed, a dirty one kept (it says where) | 2 unknown target |
+| `resume TARGET` | Hosts a stopped thread again, or any thread id the daemon knows, with its context; a stopped thread gets its former name back | 2 the daemon has no such thread |
+| `name [TARGET] NEW` | Renames a thread; from inside a Codex thread with no target, renames that thread | 2 |
+| `attach TARGET` | Inside tmux, opens a window running `codex resume <id>` and prints the pane; elsewhere prints that command | 2 tmux failed (its message follows) |
+| `notify TARGET` | From inside a Codex thread: one message back when the target's turn next ends | 2 from a Claude session (use `notify_when_idle`) or a terminal |
+| `approve TOKEN` | Approves the escalation with that token | 2 unknown token, already resolved, or lost with the Codex connection; 3 the retry could not be delivered |
+| `deny TOKEN -- WHY` | Denies it, telling the thread why | as `approve` |
+| `bridge` | Runs the bridge in the foreground (what the service runs) | |
+
+Exit codes overall: 0 ok; 1 no bridge answered and none could be started (the message quotes the last lines of `log/bridge.out`), or an op failed inside the bridge (the message names the exception; the traceback is in the bridge log); 2 usage, precondition, unknown target, or a caller that may not act on that thread; 3 delivery rejected; 4 timeout; 5 Codex daemon unreachable or a daemon error; 6 turn failed or interrupted.
+
+Every verb prints `antiphon: DEGRADED — <reason>` on stderr while the bridge is degraded.
+
+## Delegating from Claude Code
+
+The Claude skill carries the working pattern; in short: `antiphon start -C <dir> -n <name> [--read-only]` creates an idle thread, and `SendMessage(to: <name>, message: <brief>, notify_when_idle: true)` starts its first turn and subscribes to the completion signal. Later `SendMessage` calls keep the thread's context: a busy thread is steered, an idle one starts a new turn.
+
+### How completion is signalled
+
+When a turn ends, two things happen in order. The thread's full final answer is delivered to the session that spawned it as an ordinary cross-session message from the thread's name (`start --no-report` turns this off); then the idle notice goes to every session that subscribed with `notify_when_idle`, with the first 200 characters of the answer as its detail. A failed or interrupted turn reports `failed: <error>` or `interrupted: ...` the same way, and `wait` exits 6. `start --wait` / `send --wait` / `wait` print the answer in the command's output as well (the report message still goes out unless the thread was started with `--no-report`), and survive one bridge restart mid-wait.
+
+The idle notice is sent by the thread's peer child, one per hosted thread. Claude Code lists a peer only while the pid in its record is alive, so each thread the bridge hosts gets a process of its own whose registry record and messaging socket are the thread's identity. Those children die with the bridge (stdin EOF) after telling their subscribers `exited`, and are rebuilt when it restarts.
+
+Messages from a Claude session arrive in the thread prefixed `[from <name> via antiphon]`; the thread's developer instructions tell it to reply with `antiphon send <name> -- ...`.
+
+### Sandbox
+
+A spawned thread runs in Codex's `workspace-write` sandbox: it writes under its working directory and `/tmp`, reads everything your user can read, and has outbound network access, which is what lets `antiphon` inside the thread reach the bridge socket. `start --read-only` gives it the `read-only` sandbox instead. Every turn the bridge starts carries that policy.
+
+A Codex session a human started in a terminal has no such grant; `antiphon` inside it fails with `PermissionError: [Errno 1] Operation not permitted` until Codex runs with `-c sandbox_workspace_write.network_access=true` (or `[sandbox_workspace_write] network_access = true` in `~/.codex/config.toml`).
+
+## Approvals
+
+Spawned threads use Codex's automatic reviewer: escalations (a write outside the workspace, network use, a command the sandbox blocks) are decided inside the thread and the turn never blocks. Only the reviewer's denials are forwarded, as a cross-session message to the spawning session with a six-character token:
+
+```
+Codex's automatic reviewer denied an action in "<name>" (token a1b2c3): <reason> (risk <level>)
+  command: <command>
+  cwd: <cwd>
+The thread has continued without it. Reply with: antiphon approve a1b2c3   or   antiphon deny a1b2c3 -- <why>
+```
+
+`antiphon approve a1b2c3` records the approval in the thread through Codex's own override call (`thread/approveGuardianDeniedAction`, assembled the way Codex's TUI assembles it) and tells the thread to retry; if the daemon refuses the override, the approval is delivered as a message and the thread is told to retry. `antiphon deny a1b2c3 -- <why>` tells the thread the action stays denied. Whether a retried command then runs unreviewed, is reviewed again, or is denied again on the installed Codex version has not been captured yet.
+
+`start --review-by-parent` makes the spawning session the reviewer instead: each escalation is a blocking request, forwarded as `Codex asks to run an action in "<name>" ... The turn is blocked until you answer.`; `approve` answers it `accept`, `deny` answers `decline` where Codex offers it and `cancel` otherwise. The spawner is reminded once after ten minutes; nothing is ever cancelled by waiting. A request whose daemon connection dropped can no longer be answered: the bridge ends that turn if it is still waiting and tells the spawner.
+
+`antiphon ls` shows `denied <token> <age>` or `approval <token> <age>` in place of a thread's status while an escalation is unanswered; `antiphon status <name>` lists them under `pending`. Answering an escalation is allowed to the session (or thread) that spawned the thread, to any Claude Code session, and to a human at a terminal.
+
+A thread that a human started (adopted by the bridge, see below) keeps its own approvals: its TUI answers them, the bridge never does.
+
+### A permission prompt for approvals
+
+An approval that arrives as a message is decided by the receiving Claude; a message from another session never counts as the user's consent. `hooks/approve-ask.sh` is a Claude Code PreToolUse hook on Bash that turns each `antiphon approve <token>` and `antiphon deny <token>` into a real permission prompt showing the command, the directory and Codex's reason, read from the pending record in `~/.antiphon/state.json`. Install it with `./install.sh install --human-approvals`, which adds it to `$CLAUDE_CONFIG_DIR/settings.json`:
+
+```json
+{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+  {"type": "command", "command": "<repo>/hooks/approve-ask.sh", "timeout": 5}]}]}}
+```
+
+Any other command passes through the hook untouched.
+
+### Codex hooks as guards
+
+Codex runs `PermissionRequest` hooks first and only once, before the automatic reviewer: a hook `allow` or `deny` settles the escalation and the reviewer never runs; no output lets the reviewer decide; nothing runs after a reviewer denial, so a hook cannot be the forwarding surface for denials. Hooks are the place for command guards, as they are in Claude Code. `hooks/codex-block-pattern.sh` denies escalated commands matching a pattern; register it in `~/.codex/hooks.json`:
+
+```json
+{"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [
+  {"type": "command", "command": "<repo>/hooks/codex-block-pattern.sh 'rm -rf|git push --force'", "timeout": 5}]}]}}
+```
+
+A user hook runs only once trusted: the `/hooks` command in the Codex TUI records the hook's hash under `[hooks.state."<key>"] trusted_hash` in `config.toml` (the `currentHash` that `hooks/list` reports), or Codex is started with `--dangerously-bypass-hook-trust`. `tests/fixtures/README.md` (`permission-hook-order.jsonl`) records the hook input and ordering this rests on.
+
+## Attaching a terminal
+
+`antiphon attach <name>` inside tmux opens a new window in the current session running `codex resume <thread id>` and prints `session:@window.%pane`; outside tmux it prints the command for you to run anywhere. `start --visible` starts a thread and attaches in one step. The thread outlives the window.
+
+The reverse holds too: a plain `codex` TUI you start is adopted by the bridge within 15 seconds (or at once, on the daemon's `thread/started` broadcast), named `codex-<directory>` unless it has a name, and listed as a peer; it is driven by messages and `interrupt` like any thread, and closing the TUI retires it. Codex sub-agents (threads with a parent) are listed under their parent, never registered as peers, and driven only by Codex's own tools.
+
+## Codex-side use
+
+Inside a hosted thread, `antiphon ls` starts with `you are <name>`; `antiphon send <name> -- <text>` delivers a labelled cross-session message to a Claude Code session or to another thread; `antiphon notify <name>` brings `Peer <name> is idle: <summary>` back as a turn; `antiphon name <new>` renames the thread. The verbs mirror the built-in multi-agent tools (`list_agents`, `send_message`/`followup_task`, `wait_agent`, `spawn_agent`, `interrupt_agent`), which reach only the thread's own sub-agents; the Codex skill introduces each by analogy. A thread may drive, stop and answer for the threads it started itself; towards other threads and sessions it can only send messages.
+
+## Running the bridge as a service
+
+`install.sh install` does this; by hand, the commands from the headers of the two files:
+
+Linux (systemd user unit):
+
+```
+sed -e "s|@ANTIPHON@|$(command -v antiphon)|" -e "s|@PATH@|$PATH|" -e "/@ENVIRONMENT@/d" \
+    contrib/antiphon.service > ~/.config/systemd/user/antiphon.service
+systemctl --user daemon-reload && systemctl --user enable --now antiphon
+```
+
+macOS (launchd agent):
+
+```
+sed -e "s|@ANTIPHON@|$(command -v antiphon)|" -e "s|@PATH@|$PATH|" -e "s|@LOG@|$HOME/.antiphon/log|" -e "/@ENVIRONMENT@/d" \
+    contrib/com.antiphon.bridge.plist > ~/Library/LaunchAgents/com.antiphon.bridge.plist
+launchctl load ~/Library/LaunchAgents/com.antiphon.bridge.plist
+```
+
+Both run `<absolute path to antiphon> bridge`; `python -m antiphon bridge` from the environment antiphon is installed in is the same thing. The service's PATH must reach `codex`, which the bridge runs to start the app-server daemon when it is not running. If `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `ANTIPHON_HOME` is set for your sessions, `install.sh` copies them into the service; by hand, add them where the placeholders sit. A second bridge that finds one already answering exits 0, so the units restart on failure only. The bridge reconnects to the daemon with backoff when it restarts and re-subscribes to its threads.
+
+## Trust model
+
+- Same-user domain. The bridge socket is `0600` and the state file and logs sit in a `0700` directory under your home; anything running as your user can drive the bridge and answer approvals. There is no authentication between sessions, only the operating system's user boundary, which is also Claude Code's own model for cross-session messages.
+- A Codex thread you spawn reads every file your user can read and has outbound network access; `--read-only` removes the writes, not the reads. Approvals gate sandbox escalations only: what the sandbox allows never asks.
+- Names are addresses, not identities. A message `[from <name> via antiphon]` says which registry record it was sent from, and a session's name is whatever it or the bridge set; do not act on a name as proof of who is speaking.
+- Callers are classified by process ancestry: a request whose ancestor chain contains a live Claude Code session's pid is that session's; one whose chain contains a `codex` process is a Codex caller, identified by the `CODEX_THREAD_ID` Codex exports into its shell; anything else is a human at a terminal. A caller may drive, stop, rename and answer for the threads it spawned; Claude sessions and humans may do so for any thread; a Codex thread reaches other threads and sessions by labelled message only. The limit: a process that reparents itself out of the Codex tree looks like a human, so the ancestry check gates mistakes and prompt-injected shortcuts, not a determined caller with your user's rights.
+- Messages from Codex threads, their reported answers and their idle-notice details are model output. The skills say so on both sides, and both carry the same rule: never ask a peer to do what your own sandbox, reviewer or permissions refused.
+- A stopped thread keeps its transcript and its `codex/<name>` branch; nothing antiphon does deletes work.
+
+## Troubleshooting
+
+`antiphon ping` first: exit 0 prints `bridge ok · codex <version> · claude <version or none> · peers <n>`; exit 5 means the bridge is up but the Codex daemon is not answering (the bridge keeps reconnecting; `codex app-server daemon start`, and `~/.codex/app-server-daemon/app-server.stderr.log` for why it is not up); exit 2 means the bridge is degraded and prints the reasons. Exit 1 means no bridge answered and none could be started; the message quotes `~/.antiphon/log/bridge.out`.
+
+Degraded reasons come from the pins. On the Claude side a live registry record is checked for the required fields, `peerProtocol` 1, a socket path ending in `/<pid>.sock`, and a `procStart` that matches what the bridge computes for that pid; on the Codex side, a failed `initialize` or a "method not found" for `thread/loaded/list`, `turn/steer` or `thread/resume`. While a Claude-side pin fails the bridge hosts threads but registers no new peers; a Codex-side failure only marks the state and the banner. Both clear themselves once a pass finds everything in shape.
+
+A thread that never appears in `ListAgents` while `ping` is fine: `log/bridge.out` says `waiting for a Claude Code session to copy the peer record shape from` when no Claude Code session is running; the bridge registers peers only alongside a live session (it copies the record's version and pid domain from one) and retries every 15 seconds.
+
+The probe recipe for anything else: `antiphon start -n probe`, send it a message from a Claude session with `SendMessage`, then read `~/.antiphon/log/raw.jsonl` (every frame to and from the Codex daemon, the tmux and git calls) and `~/.antiphon/log/peer-<first 8 chars of the thread id>.log` (every frame on the peer socket and every command between bridge and child). Unknown frames on a peer socket are logged once per action with their bytes. `antiphon stop probe` afterwards.
+
+Other things seen:
+
+- `send` exits 3 with `direct app-server input is not allowed for multi-agent v2 sub-agents`: the target is one of Codex's sub-agents; only its parent drives it.
+- `start --worktree` exits 2 with `a branch named 'codex/<name>' already exists`: a stopped thread of that name left its branch; pick another name or delete the branch.
+- `approve` exits 2 with `was lost with the Codex connection`: the blocking request belonged to a daemon connection that dropped; send the thread a new instruction.
+- `attach` prints `codex resume <id>` instead of opening a window: the caller is not inside tmux.
+- The bridge started by the service exits at once with `a bridge already answers`: a lazily started bridge is running; `install.sh` stops it before enabling the service, or stop it yourself and restart the service.
+
+## Development
+
+`uv run pytest -q -W error` runs the suite against fakes of both sides in temporary directories; nothing touches your Codex, Claude Code or antiphon state. `tests/fixtures/README.md` describes every protocol capture and what remains uncaptured. `CLAUDE.md` has the layout and conventions.
+
+## License
+
+AGPL-3.0-or-later, see `LICENSE`.
