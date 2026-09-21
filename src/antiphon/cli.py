@@ -131,9 +131,10 @@ MISPLACED_OPTIONS = ("--wait", "--timeout")
 
 
 def _misplaced_option(tokens: list[str]) -> str | None:
-    """A `--wait`/`--timeout` that landed in the prompt because it followed `--`; only the
-    first or last token, since a legitimate prompt may mention one in its middle."""
-    ends = {tokens[0], tokens[-1]} if tokens else set()
+    """A `--wait`/`--timeout` that landed in the prompt because it followed `--`; the first
+    or the last two tokens (`--timeout` carries a value, so its number is the last token),
+    since a legitimate prompt may mention one in its middle."""
+    ends = {tokens[0], *tokens[-2:]} if tokens else set()
     return next((token for token in MISPLACED_OPTIONS if token in ends), None)
 
 
@@ -199,7 +200,9 @@ def _wait(client: Client, target: str, timeout: float | None) -> int:
             time.sleep(WAIT_RETRY_BACKOFF)
             client = connect(client.home)
     print(result["final"] if result["final"] is not None else "(no turn recorded)")
-    return 6 if result["status"] in ("failed", "interrupted") else 0
+    # A thread stopped or unloaded out from under the wait never produced the outcome asked
+    # for, so it is not a success — the same non-zero code as a failed or interrupted turn.
+    return 6 if result["status"] in ("failed", "interrupted", "stopped", "unloaded") else 0
 
 
 def verb_interrupt(args, client: Client) -> int:

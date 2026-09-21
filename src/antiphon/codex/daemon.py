@@ -181,7 +181,12 @@ class Daemon:
         if model is not None:
             params["model"] = model
         result = await self.request("thread/start", params)
-        await self.set_name(result["thread"]["id"], name)
+        try:
+            await self.set_name(result["thread"]["id"], name)
+        except DaemonError as e:
+            # The thread exists; only its daemon-side name did not take. The bridge tracks its
+            # own name, so keep the thread rather than failing a start that already succeeded.
+            log.warning("thread/name/set for %s failed after start: %r", result["thread"]["id"], e)
         return result
 
     async def thread_resume(self, thread_id: str) -> dict:

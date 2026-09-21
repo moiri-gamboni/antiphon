@@ -12,8 +12,8 @@ A thread started with the spawner as reviewer instead gets blocking
 `item/commandExecution/requestApproval` server requests; those are forwarded
 the same way, answered with a decision on `approve`/`deny`, and the spawner
 is reminded once when one has waited ten minutes. Waiting never cancels a
-request: `deny` is the way out. Only a request whose connection to the daemon
-dropped is retired, since it can no longer be answered.
+request: `deny` is the way out. A request is retired only once it can no longer
+be answered: its connection to the daemon dropped, or its asking turn ended.
 """
 
 from __future__ import annotations
@@ -351,8 +351,8 @@ class Approvals:
         except DaemonError as e:
             raise IpcError(
                 "delivery_rejected",
-                f"could not tell {thread.name} the outcome ({e.error.get('message')}); the token is still open — "
-                f"retry, or say it yourself: antiphon send {thread.name} -- <instruction>",
+                f"could not tell {thread.name} the outcome ({e.error.get('message')}); "
+                f"say it yourself: antiphon send {thread.name} -- <instruction>",
                 e.error,
             ) from e
 

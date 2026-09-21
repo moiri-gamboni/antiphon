@@ -209,6 +209,31 @@ def test_a_failed_thread_start_removes_the_worktree_it_created(short_tmp):
     assert branches.strip() == ""
 
 
+def test_a_transport_failure_during_thread_start_removes_the_worktree(short_tmp):
+    repo = short_tmp / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "root"], cwd=repo, check=True)
+
+    async def body():
+        from antiphon.codex.ws import TransportClosed
+
+        async with Rig(short_tmp) as rig:
+            async def boom(*args, **kwargs):
+                raise TransportClosed("connection lost")
+
+            rig.bridge.daemon.thread_start = boom
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.start_thread(name="helper", cwd=str(repo), worktree=True)
+            return info.value
+
+    error = run(body())
+    assert error.kind == "daemon_unreachable"
+    assert not (short_tmp / "myrepo-worktrees" / "helper").exists()
+    branches = subprocess.run(["git", "branch", "--list", "codex/helper"], cwd=repo, capture_output=True, text=True).stdout
+    assert branches.strip() == ""
+
+
 def test_start_with_worktree_outside_a_repository_is_a_precondition_error(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
@@ -405,17 +430,20 @@ def test_stop_wakes_a_pending_wait(short_tmp):
     assert run(body())["status"] == "stopped"
 
 
-def test_own_thread_closed_wakes_a_pending_wait(short_tmp):
+def test_own_thread_closed_wakes_a_pending_wait_without_a_stale_answer(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
             await rig.start_thread()
             await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, HUMAN)
+            rig.bridge.state.threads[THREAD_ID].final = "an earlier turn's answer"  # must not be returned
             waiting = asyncio.create_task(rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, HUMAN))
             await asyncio.sleep(0.05)
             await rig.fake.notify("thread/closed", {"threadId": THREAD_ID})
             return await asyncio.wait_for(waiting, 1)
 
-    assert run(body())["status"] == "unloaded"
+    result = run(body())
+    assert result["status"] == "unloaded"
+    assert result["final"] is None
 
 
 def test_wait_times_out_with_kind_timeout(short_tmp):

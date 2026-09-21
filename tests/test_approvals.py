@@ -663,6 +663,24 @@ def test_approve_leaves_the_record_open_when_the_retry_cannot_be_delivered(short
     assert resolved is False
 
 
+def test_deny_on_a_blocking_request_whose_message_fails_names_the_manual_step(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(review_by_parent=True)
+            request_id, token = await blocked(rig)
+            rig.fake.replies["turn/start"] = {"error": {"code": -32600, "message": "turn refused"}}
+            rig.fake.replies["turn/steer"] = {"error": {"code": -32600, "message": "turn refused"}}
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.bridge.dispatch("deny", {"token": token, "why": "no"}, rig.caller)
+            return info.value, await answered(rig, request_id)
+
+    error, answer = run(body())
+    assert error.kind == "delivery_rejected"
+    assert "antiphon send" in error.message
+    assert "still open" not in error.message  # the decision reached the daemon; the token is closed
+    assert answer == {"jsonrpc": "2.0", "id": 1, "result": {"decision": "cancel"}}
+
+
 def test_deny_leaves_the_record_open_when_the_message_cannot_be_delivered(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

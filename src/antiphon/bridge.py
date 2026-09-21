@@ -551,7 +551,9 @@ class Bridge:
             await self._retire(thread)
         else:
             self._set_status(thread, "unloaded")
-            self._wake_waiters(thread.thread_id, "unloaded", thread.final)
+            # No final for this wake: the turn did not complete (turn/completed would have
+            # woken the waiter first), so thread.final is a stale earlier answer.
+            self._wake_waiters(thread.thread_id, "unloaded", None)
         self.save()
 
     async def on_thread_name_updated(self, params) -> None:
@@ -952,12 +954,14 @@ class Bridge:
         async with self._reconcile_lock:
             try:
                 result = await d.thread_start(cwd, name, args["read_only"], args.get("model"), args["review_by_parent"])
-            except DaemonError as e:
+            except (DaemonError, TransportClosed, TimeoutError) as e:
                 if worktree is not None:
-                    # The thread was never created, so its worktree and branch are ours to undo,
+                    # The start did not complete, so its worktree and branch are ours to undo,
                     # or the next start of the same name fails on the leftover branch.
                     await asyncio.to_thread(self._discard_worktree, args["cwd"], name, worktree)
-                raise IpcError("precondition", f"thread/start failed: {e.error.get('message')}", e.error) from e
+                if isinstance(e, DaemonError):
+                    raise IpcError("precondition", f"thread/start failed: {e.error.get('message')}", e.error) from e
+                raise  # a transport failure; dispatch maps it to daemon_unreachable
             thread_id = result["thread"]["id"]
             thread = ThreadState(
                 thread_id=thread_id, name=name, cwd=cwd, origin="spawned", spawner=caller.owner_id,

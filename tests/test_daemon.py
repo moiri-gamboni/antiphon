@@ -395,6 +395,17 @@ def test_thread_start_sends_the_headless_thread_parameters_then_names_the_thread
     assert name_params == {"threadId": THREAD_ID, "name": "helper"}
 
 
+def test_thread_start_keeps_the_thread_when_naming_it_fails(tmp_path):
+    async def body():
+        async with Harness(tmp_path) as h:
+            h.fake.replies["thread/start"] = {"result": THREAD_START.result(2)}
+            h.fake.replies["thread/name/set"] = {"error": {"code": -32600, "message": "bad name"}}
+            return await h.daemon.thread_start("/tmp/work", "helper", read_only=False, model=None)
+
+    result = run(body())
+    assert result["thread"]["id"] == THREAD_ID
+
+
 def test_thread_start_read_only_model_and_parent_review_map_to_their_parameters(tmp_path):
     async def body():
         async with Harness(tmp_path) as h:

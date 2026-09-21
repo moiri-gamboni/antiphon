@@ -222,6 +222,15 @@ def test_send_refuses_a_wait_placed_after_the_separator(rig, capsys):
     assert "--wait" in err
 
 
+def test_send_refuses_a_timeout_placed_after_the_separator(rig, capsys):
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    # --timeout carries a value, so the number is the last token, not --timeout itself.
+    code, out, err = rig.run("send", "helper", "--", "go now", "--timeout", "30", capsys=capsys)
+    assert code == 2
+    assert "--timeout" in err
+    assert rig.daemon.received("turn/start") == []
+
+
 def test_a_failed_turn_exits_6_with_the_failure_text(rig, capsys):
     assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
     assert rig.run("send", "helper", "--", "go", capsys=capsys)[0] == 0
@@ -250,6 +259,18 @@ def test_wait_survives_a_bridge_restart(rig, capsys):
     out, err = waiting.communicate(timeout=15)
     assert waiting.returncode == 0, err
     assert out == "DONE\n"
+
+
+def test_wait_reports_a_stopped_or_unloaded_thread_as_a_non_success(tmp_path):
+    class FakeClient:
+        home = tmp_path
+
+        def call(self, op, args=None, timeout=30):
+            if op == "status":
+                return {"thread_id": "t1"}
+            return {"status": "stopped", "final": None, "thread_id": "t1"}
+
+    assert cli._wait(FakeClient(), "helper", None) == 6
 
 
 def test_wait_gives_up_after_a_second_loss_naming_the_rerun_command(rig, capsys, monkeypatch):
