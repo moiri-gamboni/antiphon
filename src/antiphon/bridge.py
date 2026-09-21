@@ -43,6 +43,20 @@ METHOD_NOT_FOUND = -32601
 # Ops that act on one thread, gated by who spawned it.
 # `send` is absent: every caller may send, and its target may be a Claude session rather than a thread.
 OWNED_OPS = frozenset({"interrupt", "stop", "name", "approve", "deny"})
+# The arguments each op requires from the CLI, checked before the handler runs so a missing
+# one is a usage error and a KeyError from inside a handler stays an internal error.
+REQUIRED_ARGS = {
+    "start": ("cwd", "read_only", "report", "worktree", "review_by_parent"),
+    "send": ("target", "text"),
+    "interrupt": ("target",),
+    "wait": ("target",),
+    "stop": ("target",),
+    "resume": ("target",),
+    "name": ("new",),
+    "approve": ("token",),
+    "deny": ("token", "why"),
+    "notify": ("target",),
+}
 WAIT_DEFAULT_TIMEOUT = 600.0
 DAEMON_WAIT = 3.0
 BIND_PROBE_TIMEOUT = 2.0
@@ -345,11 +359,11 @@ class Bridge:
         handler = self.ops.get(op)
         if handler is None:
             raise IpcError("unknown_op", f"unknown op {op!r}")
-        try:
-            self._check_ownership(op, args, caller)
-            return await handler(args, caller)
-        except KeyError as e:
-            raise IpcError("usage", f"{op} needs argument {e.args[0]!r}") from e
+        missing = next((a for a in REQUIRED_ARGS.get(op, ()) if a not in args), None)
+        if missing is not None:
+            raise IpcError("usage", f"{op} needs argument {missing!r}")
+        self._check_ownership(op, args, caller)
+        return await handler(args, caller)
 
     def _check_ownership(self, op: str, args: dict, caller: Caller) -> None:
         """The ownership rule: a caller drives, stops and approves what it spawned; a

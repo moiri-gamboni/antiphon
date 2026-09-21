@@ -865,6 +865,24 @@ def test_ls_lists_threads_and_marks_a_codex_callers_own_row(short_tmp):
     assert human[0]["self"] is False
 
 
+def test_a_reshaped_daemon_reply_is_an_internal_error_not_a_missing_argument(short_tmp, caplog):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/start"] = {"result": {"thread": {}}}  # the id the bridge reads is gone
+            with caplog.at_level(logging.ERROR, logger="antiphon.ipc"):
+                with pytest.raises(ipc.IpcError) as info:
+                    await asyncio.to_thread(
+                        ipc.call, str(rig.home / "bridge.sock"), "start",
+                        dict(cwd="/w", name="h", read_only=False, report=True, worktree=False, review_by_parent=False),
+                    )
+            return info.value, caplog.text
+
+    error, log_text = run(body())
+    assert error.kind == "internal"
+    assert "KeyError" in error.message
+    assert "KeyError" in log_text  # the traceback reached the bridge log
+
+
 def test_unknown_op_and_missing_argument_are_reported_not_crashed(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
