@@ -69,7 +69,6 @@ def test_a_denied_review_creates_a_pending_record_and_one_message_to_the_spawner
     assert record["token"] == DENIED_TOKEN
     assert record["kind"] == "denied"
     assert record["command"] == COMMAND
-    assert record["review_started_params"] == for_thread(REVIEW_STARTED)
     assert record["review_completed_params"] == for_thread(REVIEW_DENIED)
     assert record["resolved"] is False
     assert texts == [DENIAL_MESSAGE]

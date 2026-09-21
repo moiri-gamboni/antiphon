@@ -46,14 +46,11 @@ REPLY_COMMANDS = "Reply with: antiphon approve {token}   or   antiphon deny {tok
 class Pending:
     token: str
     thread_id: str
-    review_id: str | None
-    target_item_id: str | None
     turn_id: str | None
     command: str
     cwd: str
     rationale: str | None
     risk_level: str | None
-    review_started_params: dict | None
     review_completed_params: dict | None
     since: float
     resolved: bool
@@ -135,7 +132,6 @@ class Approvals:
     def __init__(self, bridge: Bridge):
         self.bridge = bridge
         self.clock = time.time
-        self._started: dict[str, dict] = {}  # review id -> the started notification, until its completion arrives
 
     # --- the records ------------------------------------------------------------------
 
@@ -181,21 +177,16 @@ class Approvals:
 
     # --- the reviewer's denials ---------------------------------------------------------
 
-    async def on_review_started(self, params) -> None:
-        self._started[params["reviewId"]] = params
-
     async def on_review_completed(self, params) -> None:
-        started = self._started.pop(params["reviewId"], None)
         thread = self.bridge.state.threads.get(params["threadId"])
         if params["review"]["status"] != "denied" or thread is None or thread.origin != "spawned":
             log.info("review %s on %s: %s", params["reviewId"], params["threadId"], params["review"]["status"])
             return
         command, cwd = describe_action(params["action"])
         record = Pending(
-            token=token_for(params["reviewId"]), thread_id=thread.thread_id, review_id=params["reviewId"],
-            target_item_id=params["targetItemId"], turn_id=params["turnId"], command=command, cwd=cwd,
+            token=token_for(params["reviewId"]), thread_id=thread.thread_id, turn_id=params["turnId"], command=command, cwd=cwd,
             rationale=params["review"]["rationale"], risk_level=params["review"]["riskLevel"],
-            review_started_params=started, review_completed_params=params, since=self.clock(), resolved=False,
+            review_completed_params=params, since=self.clock(), resolved=False,
             kind="denied", request_id=None, epoch=None, available_decisions=None,
         )
         self._add(thread, record)
@@ -219,9 +210,9 @@ class Approvals:
             await self.bridge.refuse_server_request(request_id, method, params)
             return
         record = Pending(
-            token=token_for(f"{self.bridge.daemon.epoch}:{request_id}"), thread_id=thread.thread_id, review_id=None,
-            target_item_id=params["itemId"], turn_id=params["turnId"], command=params["command"], cwd=params["cwd"],
-            rationale=params["reason"], risk_level=None, review_started_params=None, review_completed_params=None,
+            token=token_for(f"{self.bridge.daemon.epoch}:{request_id}"), thread_id=thread.thread_id,
+            turn_id=params["turnId"], command=params["command"], cwd=params["cwd"],
+            rationale=params["reason"], risk_level=None, review_completed_params=None,
             since=self.clock(), resolved=False, kind="request", request_id=request_id, epoch=self.bridge.daemon.epoch,
             available_decisions=params["availableDecisions"],
         )
@@ -358,7 +349,6 @@ def install(bridge: Bridge) -> Approvals:
     bridge.ops["approve"] = approvals.op_approve
     bridge.ops["deny"] = approvals.op_deny
     bridge.on_server_request = approvals.on_server_request
-    bridge.notifications["item/autoApprovalReview/started"] = approvals.on_review_started
     bridge.notifications["item/autoApprovalReview/completed"] = approvals.on_review_completed
     bridge.notifications["serverRequest/resolved"] = approvals.on_server_request_resolved
     bridge.sweeps.append(approvals.sweep)
