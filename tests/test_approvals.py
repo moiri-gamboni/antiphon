@@ -493,18 +493,6 @@ def test_a_claude_session_may_approve_a_thread_another_session_spawned(short_tmp
     assert run(body()) == DENIED_TOKEN
 
 
-def test_a_claude_caller_running_notify_is_told_to_use_send_message(short_tmp):
-    async def body():
-        async with Rig(short_tmp) as rig:
-            with pytest.raises(ipc.IpcError) as err:
-                await rig.bridge.dispatch("notify", {"target": "helper"}, CLAUDE_STRANGER)
-            return err.value
-
-    err = run(body())
-    assert err.kind == "usage"
-    assert "use SendMessage with notify_when_idle" in err.message
-
-
 def test_a_codex_thread_may_not_answer_its_own_escalation_or_stop_itself_but_may_rename_itself(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

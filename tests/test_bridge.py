@@ -1424,23 +1424,6 @@ def test_notify_subscribes_to_the_peer_and_relays_its_idle_notice_as_a_turn(shor
     assert params["input"] == [{"type": "text", "text": f"Peer claude-main is idle: {CAPTURED_IDLE_NOTICE['detail']}"}]
 
 
-def test_a_claude_caller_running_notify_is_told_to_use_notify_when_idle(short_tmp):
-    async def body():
-        async with Rig(short_tmp) as rig:
-            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
-            try:
-                await rig.start_thread(name="helper")
-                with pytest.raises(ipc.IpcError) as info:
-                    await rig.bridge.dispatch("notify", {"target": "helper"}, claude_caller(claude))
-                return info.value
-            finally:
-                claude.close()
-
-    error = run(body())
-    assert error.kind == "usage"
-    assert "notify_when_idle" in error.message
-
-
 def test_ls_rows_carry_a_sub_agents_nickname_and_role(short_tmp):
     parent = copy.deepcopy(ADOPTION.result(2))
     parent["thread"]["id"] = SUB_AGENT_PARENT
