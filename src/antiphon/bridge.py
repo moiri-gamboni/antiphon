@@ -945,6 +945,10 @@ class Bridge:
             try:
                 result = await d.thread_start(cwd, name, args["read_only"], args.get("model"), args["review_by_parent"])
             except DaemonError as e:
+                if worktree is not None:
+                    # The thread was never created, so its worktree and branch are ours to undo,
+                    # or the next start of the same name fails on the leftover branch.
+                    await asyncio.to_thread(self._discard_worktree, args["cwd"], name, worktree)
                 raise IpcError("precondition", f"thread/start failed: {e.error.get('message')}", e.error) from e
             thread_id = result["thread"]["id"]
             thread = ThreadState(
@@ -968,6 +972,12 @@ class Bridge:
         if added.returncode != 0:
             raise IpcError("precondition", f"git worktree add failed: {added.stderr.strip()}")
         return path
+
+    def _discard_worktree(self, cwd: str, name: str, path: str) -> None:
+        """Undo a worktree and its branch created for a start that then failed."""
+        repo = _git(["rev-parse", "--show-toplevel"], cwd, self.rawlog).stdout.strip()
+        _git(["worktree", "remove", "--force", path], repo, self.rawlog)
+        _git(["branch", "-D", f"codex/{name}"], repo, self.rawlog)
 
     def _remove_worktree(self, path: str) -> str | None:
         """Remove a worktree the bridge created; the reason it stayed, if git kept it."""

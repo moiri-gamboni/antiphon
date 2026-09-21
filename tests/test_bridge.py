@@ -188,6 +188,27 @@ def test_start_with_worktree_checks_out_a_branch_beside_the_repo(short_tmp):
     assert branch == "codex/helper"
 
 
+def test_a_failed_thread_start_removes_the_worktree_it_created(short_tmp):
+    repo = short_tmp / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "root"], cwd=repo, check=True)
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/start"] = {"error": {"code": -32600, "message": "no such model"}}
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.start_thread(name="helper", cwd=str(repo), worktree=True)
+            return info.value
+
+    error = run(body())
+    assert error.kind == "precondition"
+    expected = short_tmp / "myrepo-worktrees" / "helper"
+    assert not expected.exists()
+    branches = subprocess.run(["git", "branch", "--list", "codex/helper"], cwd=repo, capture_output=True, text=True).stdout
+    assert branches.strip() == ""
+
+
 def test_start_with_worktree_outside_a_repository_is_a_precondition_error(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
