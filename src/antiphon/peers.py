@@ -95,7 +95,8 @@ class CodexSide:
         else:
             raise IpcError("usage", "name needs a target: antiphon name <thread> <new>")
         former = thread.name
-        return {**await self.bridge.op_name({**args, "target": thread.thread_id}, caller), "former": former}
+        renamed = await self.bridge.op_name({**args, "target": thread.thread_id}, caller)
+        return {**renamed, "former": former}
 
     # --- child events -------------------------------------------------------------------
 
