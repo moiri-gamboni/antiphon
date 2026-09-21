@@ -123,6 +123,40 @@ def test_a_message_from_claude_starts_a_turn_with_the_prefixed_text_and_no_recei
     assert status == "busy"
 
 
+def test_a_message_relayed_while_the_daemon_connection_is_dead_yields_one_dropped_receipt(short_tmp):
+    from antiphon.codex.daemon import Daemon
+
+    async def noop(*args):
+        pass
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            # Stop the connect loop, then give the bridge a daemon whose connection has
+            # dropped: the relay's first daemon call finds the transport gone, which must
+            # reach the child as one dropped receipt, not vanish with the fire-and-forget task.
+            rig.bridge._closing = True
+            await rig.fake.drop()
+            await until(lambda: rig.bridge.daemon is None)
+            dead = await Daemon.connect(str(rig.daemon_sock), noop, noop)
+            await rig.fake.drop()
+            await asyncio.wait_for(dead.closed.wait(), 2)
+            rig.bridge.daemon = dead
+            rig.bridge.subscribed[THREAD_ID] = dead.epoch
+            sent = rig.send_to_child(CAPTURED_INBOUND)
+            frames = await rig.frames(1, timeout=5.0)
+            more = await rig.frames(2, timeout=0.3)
+            return sent, frames, more
+
+    sent, frames, more = run(body())
+    assert len(frames) == 1
+    receipt = frames[0]
+    assert receipt["action"] == "peer_message_status"
+    assert receipt["status"] == "dropped"
+    assert receipt["orig_msg_id"] == sent["msg_id"]
+    assert more == frames
+
+
 def test_a_rejected_turn_start_sends_exactly_one_dropped_receipt(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

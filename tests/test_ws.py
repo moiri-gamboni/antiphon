@@ -145,3 +145,16 @@ def test_connection_reset_raises_transport_closed(tmp_path):
         await sock.close()
 
     run(with_fake(tmp_path, body))
+
+
+def test_send_text_after_the_peer_is_gone_raises_transport_closed(tmp_path):
+    async def body(fake):
+        sock = await ws.UnixWebSocket.connect(fake.socket_path)
+        await fake.drop()
+        await asyncio.sleep(0.05)
+        with pytest.raises(ws.TransportClosed):
+            for _ in range(2000):
+                await sock.send_text("x" * 10_000)
+        await sock.close()
+
+    run(with_fake(tmp_path, body))

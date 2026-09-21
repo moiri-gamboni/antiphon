@@ -82,8 +82,13 @@ class UnixWebSocket:
         return cls(reader, writer)
 
     async def send_text(self, text: str) -> None:
-        self._writer.write(encode_frame(OP_TEXT, text.encode(), os.urandom(4)))
-        await self._writer.drain()
+        try:
+            self._writer.write(encode_frame(OP_TEXT, text.encode(), os.urandom(4)))
+            await self._writer.drain()
+        except OSError as e:
+            # The peer is gone; the reader reports the same event as TransportClosed,
+            # and a sender must not see a different exception type for it.
+            raise TransportClosed(f"connection lost while sending: {e}", self._last_bytes) from e
 
     async def recv_text(self) -> str:
         while True:

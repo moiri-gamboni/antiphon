@@ -250,6 +250,17 @@ def test_dropped_connection_fails_pending_requests_and_marks_the_daemon_closed(t
     assert isinstance(reason, TransportClosed)
 
 
+def test_a_request_after_the_connection_dropped_raises_transport_closed(tmp_path):
+    async def body():
+        async with Harness(tmp_path) as h:
+            await h.fake.drop()
+            await asyncio.wait_for(h.daemon.closed.wait(), 2)
+            with pytest.raises(TransportClosed):
+                await h.daemon.request("thread/read", {"threadId": "x"})
+
+    run(body())
+
+
 def test_a_malformed_frame_from_the_daemon_ends_the_connection_loudly(tmp_path, caplog):
     async def body():
         async with Harness(tmp_path) as h:

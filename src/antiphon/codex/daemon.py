@@ -135,6 +135,10 @@ class Daemon:
         return d
 
     async def request(self, method: str, params, timeout: float = 30) -> dict:
+        if self._reader.done():
+            # The reader has ended, so no reply will ever come; fail now instead of
+            # writing to a dead socket and waiting the full timeout for nothing.
+            raise self.close_reason or ws.TransportClosed("connection closed")
         request_id = next(self._ids)
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
