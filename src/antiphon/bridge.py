@@ -1054,13 +1054,14 @@ class Bridge:
                 "threads": len(self.state.threads),
                 "degraded": self.state.degraded,
             }
-        t = self.resolve(target)
+        thread = self.resolve(target)
         return {
-            "name": t.name, "thread_id": t.thread_id, "cwd": t.cwd, "origin": t.origin, "spawner": t.spawner,
-            "status": t.status, "active_turn_id": t.active_turn_id, "pending": self.approvals.labels(t), "last_error": t.last_error,
-            "final": t.final, "outcome": t.outcome, "read_only": t.read_only, "child_pid": t.child_pid,
-            "worktree": t.worktree,
-            "sub_agents": [{"thread_id": s.thread_id, "nickname": s.nickname, "role": s.role, "status": s.status} for s in t.sub_agents.values()],
+            "name": thread.name, "thread_id": thread.thread_id, "cwd": thread.cwd, "origin": thread.origin,
+            "spawner": thread.spawner, "status": thread.status, "active_turn_id": thread.active_turn_id,
+            "pending": self.approvals.labels(thread), "last_error": thread.last_error, "final": thread.final,
+            "outcome": thread.outcome, "read_only": thread.read_only, "child_pid": thread.child_pid,
+            "worktree": thread.worktree,
+            "sub_agents": [{"thread_id": s.thread_id, "nickname": s.nickname, "role": s.role, "status": s.status} for s in thread.sub_agents.values()],
         }
 
     async def op_ls(self, args: dict, caller: Caller) -> list[dict]:
@@ -1146,6 +1147,7 @@ class Bridge:
         await self._child_rename(thread)
         self.save()
         return {"name": name, "thread_id": thread.thread_id}
+
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(name)s %(levelname)s %(message)s")
