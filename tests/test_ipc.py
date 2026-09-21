@@ -125,6 +125,29 @@ def test_a_handler_exception_is_reported_as_an_internal_error_and_the_server_sur
     assert "handler bug" in caplog.text
 
 
+def test_a_client_that_hangs_up_before_the_reply_is_not_an_unhandled_error(tmp_path):
+    async def body():
+        async with Served(tmp_path) as s:
+            s.results["ping"] = {"blob": "x" * 500_000}  # large enough that the drain must flush
+            errors = []
+            asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: errors.append(ctx))
+
+            def rude():
+                c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                c.connect(s.path)
+                c.sendall(json.dumps({"v": 1, "op": "ping", "args": {}}).encode() + b"\n")
+                c.close()  # hang up before reading the reply
+
+            await asyncio.to_thread(rude)
+            await asyncio.sleep(0.2)
+            healthy = await asyncio.to_thread(ipc.call, s.path, "ping", {})
+            return errors, "blob" in healthy
+
+    errors, healthy = run(body())
+    assert errors == []
+    assert healthy
+
+
 def test_a_request_that_is_not_json_gets_a_bad_request_reply(tmp_path):
     async def body():
         async with Served(tmp_path) as s:

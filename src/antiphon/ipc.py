@@ -76,8 +76,13 @@ async def serve(path: str, handler, extra=None) -> asyncio.AbstractServer:
             if extra is not None:
                 reply.update(extra())
             log.debug("ipc reply: %s", reply)
-            writer.write(json.dumps(reply).encode() + b"\n")
-            await writer.drain()
+            try:
+                writer.write(json.dumps(reply).encode() + b"\n")
+                await writer.drain()
+            except (ConnectionResetError, BrokenPipeError) as e:
+                # The CLI gave up (a timed-out or interrupted wait) before reading the reply;
+                # an ordinary event, not a bridge fault, so no traceback in the bridge log.
+                log.debug("client hung up before the reply: %r", e)
         finally:
             writer.close()
 
