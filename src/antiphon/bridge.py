@@ -24,7 +24,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from antiphon import callers, ipc
+from antiphon import callers, ipc, peers
 from antiphon.callers import Caller
 from antiphon.claude import registry
 from antiphon.codex import daemon as daemon_mod
@@ -94,8 +94,9 @@ class PeerChild:
         await self.send(cmd="register", **fields)
         return await asyncio.wait_for(self._ready, REGISTER_TIMEOUT)
 
-    async def deliver(self, to_sock: str, text: str, from_name: str) -> str | None:
-        """Send a user frame to a peer socket; the failure reason, or None once it was written."""
+    async def deliver(self, to_sock: str, text: str, from_name: str) -> dict:
+        """Send a user frame to a peer socket; the child's answer, `{"ev": "sent", "msg_id"}`
+        once the frame was written or `{"ev": "send_failed", "reason", ...}`."""
         outcome = asyncio.get_running_loop().create_future()
         self._deliveries.append(outcome)
         await self.send(cmd="deliver", to_sock=to_sock, text=text, from_name=from_name)
@@ -123,16 +124,17 @@ class PeerChild:
                 kind = event["ev"]
                 if kind == "ready":
                     self._ready.set_result(event)
-                elif kind == "sent" and self._deliveries:
-                    self._deliveries.popleft().set_result(None)
-                elif kind == "send_failed" and "msg_id" in event and self._deliveries:
-                    self._deliveries.popleft().set_result(event["reason"])
+                elif (kind == "sent" or (kind == "send_failed" and "msg_id" in event)) and self._deliveries:
+                    self._deliveries.popleft().set_result(event)
+                    # Let the awaiting sender run before the next line is parsed: a receipt for
+                    # this very message may already be buffered, and it must find the sender waiting.
+                    await asyncio.sleep(0)
                 else:
                     await self.on_event(self.thread_id, event)
         finally:
             for outcome in self._deliveries:
                 if not outcome.done():
-                    outcome.set_result("peer child exited")
+                    outcome.set_result({"ev": "send_failed", "reason": "peer child exited"})
             if self._ready is not None and not self._ready.done():
                 self._ready.set_exception(RuntimeError("peer child exited before it was ready"))
             await self.proc.wait()
@@ -243,6 +245,7 @@ class Bridge:
             "unknown_frame": self.on_child_unknown_frame,
             "exited": self.on_child_exited,
         }
+        peers.install(self)
 
     # --- lifecycle ---------------------------------------------------------------
 
@@ -776,9 +779,9 @@ class Bridge:
         if child is None:
             log.warning("%s has no peer child to deliver from; dropping: %.80s", thread.name, text)
             return False
-        reason = await child.deliver(record.socket_path, text, thread.name)
-        if reason is not None:
-            log.warning("delivery from %s to its spawner failed: %s", thread.name, reason)
+        answer = await child.deliver(record.socket_path, text, thread.name)
+        if answer["ev"] != "sent":
+            log.warning("delivery from %s to its spawner failed: %s", thread.name, answer["reason"])
             return False
         return True
 
@@ -788,7 +791,10 @@ class Bridge:
         if thread.status == "unloaded":
             await d.thread_resume(thread.thread_id)
             self.subscribed[thread.thread_id] = d.epoch
-        delivery = await deliver(d, thread.thread_id, text, self._sandbox_policy(thread))
+        effort = None if thread.effort_sent else thread.effort
+        delivery = await deliver(d, thread.thread_id, text, self._sandbox_policy(thread), effort)
+        if delivery.kind == "started":
+            thread.effort_sent = True
         thread.active_turn_id = delivery.turn_id
         self._set_status(thread, "busy")
         self.save()
@@ -855,7 +861,7 @@ class Bridge:
         # done; holding the reconcile lock keeps that pass from adopting our own thread.
         async with self._reconcile_lock:
             try:
-                result = await d.thread_start(cwd, name, args["read_only"], args.get("model"), args.get("effort"), args["review_by_parent"])
+                result = await d.thread_start(cwd, name, args["read_only"], args.get("model"), args["review_by_parent"])
             except DaemonError as e:
                 raise IpcError("daemon", f"thread/start failed: {e.error.get('message')}", e.error) from e
             thread_id = result["thread"]["id"]
@@ -969,7 +975,8 @@ class Bridge:
                          "self": caller.codex_thread == thread.thread_id, "thread_id": thread.thread_id})
             for sub in thread.sub_agents.values():
                 rows.append({"name": sub.nickname or sub.thread_id[:8], "kind": "codex-agent", "status": sub.status,
-                             "cwd": thread.cwd, "self": False, "thread_id": sub.thread_id, "parent": thread.name})
+                             "cwd": thread.cwd, "self": False, "thread_id": sub.thread_id, "parent": thread.name,
+                             "role": sub.role})
         return rows
 
     async def op_stop(self, args: dict, caller: Caller) -> dict:

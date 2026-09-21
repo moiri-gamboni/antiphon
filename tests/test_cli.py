@@ -1,5 +1,6 @@
 """The CLI over the real bridge (started lazily as a subprocess) over the fake daemon."""
 
+import asyncio
 import copy
 import json
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from antiphon import cli, ipc
+from antiphon.bridge import Bridge
 from fake_claude import FakeClaude
 from fake_daemon import FakeDaemonThread, load_fixture
 
@@ -287,13 +289,219 @@ def test_ls_prints_an_aligned_table_with_a_star_on_the_callers_row(rig):
         claude.close()
     assert done.returncode == 0, done.stderr
     lines = done.stdout.splitlines()
-    assert lines[0].split() == ["NAME", "KIND", "STATUS", "CWD"]
-    rows = {line.split()[1] if line.startswith("*") else line.split()[0]: line for line in lines[1:]}
+    assert lines[0] == "you are claude-main"
+    assert lines[1].split() == ["NAME", "KIND", "STATUS", "CWD"]
+    rows = {line.split()[1] if line.startswith("*") else line.split()[0]: line for line in lines[2:]}
     assert rows["claude-main"].startswith("* claude-main")
     assert not rows["helper"].startswith("*")
     assert rows["helper"].split() == ["helper", "codex", "idle", str(rig.tmp)]
-    name_col = [line.index("claude") for line in lines[1:] if "claude-main" in line][0]
-    assert all(line[name_col - 1] == " " for line in lines)
+    name_col = [line.index("claude") for line in lines[2:] if "claude-main" in line][0]
+    assert all(line[name_col - 1] == " " for line in lines[1:])
+
+
+def test_ls_has_no_header_for_a_human_and_indents_a_sub_agent_with_its_role(rig, capsys):
+    sub_agent = load_fixture("sub-agent.jsonl")
+    sub = copy.deepcopy(sub_agent.result(2, occurrence=1))
+    sub["thread"]["agentRole"] = "reviewer"
+    sub_id, parent_id = sub["thread"]["id"], sub["thread"]["parentThreadId"]
+    parent = copy.deepcopy(load_fixture("adoption.jsonl").result(2))
+    parent["thread"]["id"] = parent_id
+    parent["thread"]["name"] = "orchestrator"
+    rig.daemon.replies["thread/read"] = lambda params: {"result": sub if params["threadId"] == sub_id else parent}
+    rig.daemon.replies["thread/loaded/list"] = {"result": {"data": [sub_id, parent_id], "nextCursor": None}}
+    claude = FakeClaude(rig.config_dir / "sessions", rig.tmp / "socks", name="claude-main")
+    try:
+        assert rig.run("ping", capsys=capsys)[0] == 0
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and rig.run("ping", capsys=capsys)[1] != "bridge ok · codex 0.155.1 · claude 2.1.278 · peers 1\n":
+            time.sleep(0.1)
+        code, out, err = rig.run("ls", capsys=capsys)
+        registered = sorted(json.loads(p.read_text())["name"] for p in (rig.config_dir / "sessions").glob("*.json"))
+    finally:
+        claude.close()
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0].split() == ["NAME", "KIND", "STATUS", "CWD"]
+    assert [line.split()[0] for line in lines[2:]] == ["orchestrator", "Bernoulli"]
+    assert lines[3].startswith("    Bernoulli (reviewer)")
+    assert lines[3].split()[2] == "codex-agent"
+    assert registered == ["claude-main", "orchestrator"]
+
+
+# --- attach --------------------------------------------------------------------------
+
+
+def tmux_run(calls: list, returncode: int = 0, stdout: str = "main:@3.%7\n", stderr: str = ""):
+    def fake(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, returncode=returncode, stdout=stdout, stderr=stderr)
+
+    return fake
+
+
+def raw_tmux_lines(rig) -> list[dict]:
+    return [json.loads(line) for line in (rig.home / "log" / "raw.jsonl").read_text().splitlines() if '"tmux"' in line]
+
+
+def test_attach_inside_tmux_opens_a_window_on_the_thread_and_prints_the_pane(rig, capsys, monkeypatch):
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
+    calls = []
+    monkeypatch.setattr(subprocess, "run", tmux_run(calls))
+    code, out, err = rig.run("attach", "helper", capsys=capsys)
+    assert (code, out, err) == (0, "main:@3.%7\n", "")
+    assert calls == [["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_id}.#{pane_id}", "-n", "helper", f"codex resume {THREAD_ID}"]]
+    logged = raw_tmux_lines(rig)
+    assert [(line["dir"], line["boundary"]) for line in logged] == [("out", "tmux"), ("in", "tmux")]
+    assert logged[0]["data"] == calls[0]
+    assert logged[1]["data"] == {"rc": 0, "stdout": "main:@3.%7\n", "stderr": ""}
+
+
+def test_attach_outside_tmux_prints_the_resume_command(rig, capsys, monkeypatch):
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(subprocess, "run", tmux_run([], returncode=1, stderr="must not run"))
+    code, out, err = rig.run("attach", "helper", capsys=capsys)
+    assert (code, out, err) == (0, f"codex resume {THREAD_ID}\n", "")
+
+
+def test_attach_reports_a_tmux_failure_with_exit_2(rig, capsys, monkeypatch):
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
+    monkeypatch.setattr(subprocess, "run", tmux_run([], returncode=1, stdout="", stderr="no current session\n"))
+    code, out, err = rig.run("attach", "helper", capsys=capsys)
+    assert code == 2
+    assert out == ""
+    assert "no current session" in err
+
+
+def test_start_visible_starts_the_thread_then_attaches(rig, capsys, monkeypatch):
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
+    started_before_tmux = []
+
+    def fake(argv, **kwargs):
+        started_before_tmux.append(len(rig.daemon.received("thread/start")))
+        return subprocess.CompletedProcess(argv, returncode=0, stdout="main:@4.%9\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    code, out, err = rig.run("start", "-n", "helper", "-C", str(rig.tmp), "--visible", capsys=capsys)
+    assert code == 0
+    assert out == f"started helper ({THREAD_ID}) in {rig.tmp}\nmain:@4.%9\n"
+    assert started_before_tmux == [1]
+
+
+# --- the Codex-side verbs ---------------------------------------------------------------
+
+
+class CodexAncestry:
+    """A process table in which every caller is the child of one Codex process."""
+
+    CODEX_PID = 424242
+
+    def parent(self, pid: int) -> int | None:
+        return 1 if pid == self.CODEX_PID else self.CODEX_PID
+
+    def comm(self, pid: int) -> str | None:
+        return "codex" if pid == self.CODEX_PID else None
+
+
+class BridgeThread:
+    """The real bridge in this process, on its own loop in a thread, with the caller
+    classification injected: a CLI call made from the test process is then a Codex caller."""
+
+    def __init__(self, rig: CliRig):
+        self.bridge = Bridge(
+            rig.home, sessions_dir=rig.config_dir / "sessions", codex_home=rig.codex_home,
+            ensure_running=lambda codex_home, rawlog=None: str(rig.daemon_sock), process_table=CodexAncestry(),
+        )
+        self.bridge.reconnect_backoff = (0.05, 0.2)
+        self.bridge.reconcile_interval = 3600
+        self.loop = asyncio.new_event_loop()
+        self.stop: asyncio.Event | None = None
+        self.up = threading.Event()
+        self.thread = threading.Thread(target=self.loop.run_until_complete, args=(self._main(),), daemon=True, name="bridge")
+        self.thread.start()
+        assert self.up.wait(5)
+
+    async def _main(self) -> None:
+        self.stop = asyncio.Event()
+        await self.bridge.start()
+        while self.bridge.last_reconcile is None:
+            await asyncio.sleep(0.01)
+        self.up.set()
+        await self.stop.wait()
+        await self.bridge.close()
+
+    def close(self) -> None:
+        self.loop.call_soon_threadsafe(self.stop.set)
+        self.thread.join(timeout=10)
+        self.loop.close()
+
+
+@pytest.fixture
+def codex_rig(rig, monkeypatch):
+    """The CLI rig with a Claude session present and every CLI call classified as coming
+    from the hosted thread `helper`."""
+    claude = FakeClaude(rig.config_dir / "sessions", rig.tmp / "socks", name="claude-main")
+    bridge = BridgeThread(rig)
+    monkeypatch.setenv("CODEX_THREAD_ID", THREAD_ID)
+    rig.claude = claude
+    try:
+        yield rig
+    finally:
+        bridge.close()
+        claude.close()
+
+
+def test_a_codex_caller_sees_its_own_name_in_the_ls_header(codex_rig, capsys):
+    rig = codex_rig
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    code, out, err = rig.run("ls", capsys=capsys)
+    assert code == 0
+    assert out.splitlines()[0] == "you are helper"
+    assert [line.split()[1] for line in out.splitlines()[2:] if line.startswith("*")] == ["helper"]
+
+
+def test_a_codex_caller_renames_itself_without_naming_a_target(codex_rig, capsys):
+    rig = codex_rig
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    code, out, err = rig.run("name", "planner", capsys=capsys)
+    assert (code, out) == (0, "renamed helper to planner\n")
+    assert rig.daemon.received("thread/name/set")[-1]["params"] == {"threadId": THREAD_ID, "name": "planner"}
+
+
+def test_a_codex_caller_sends_to_a_claude_session_and_is_told_sent(codex_rig, capsys, monkeypatch):
+    from antiphon import peers
+
+    monkeypatch.setattr(peers, "RECEIPT_WAIT", 0.3)
+    rig = codex_rig
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    code, out, err = rig.run("send", "claude-main", "--", "hello from codex", capsys=capsys)
+    assert (code, out) == (0, "sent\n")
+    [frame] = rig.claude.wait_for_frames(1)
+    assert 'from-name="helper"' in frame["message"]["content"]
+    assert "hello from codex" in frame["message"]["content"]
+
+
+def test_a_codex_caller_subscribes_to_a_peers_idle_notice(codex_rig, capsys):
+    rig = codex_rig
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    code, out, err = rig.run("notify", "claude-main", capsys=capsys)
+    assert code == 0
+    assert "claude-main" in out
+    [frame] = rig.claude.wait_for_frames(1)
+    assert frame["action"] == "notify_when_idle"
+
+
+def test_a_claude_caller_running_notify_exits_2_naming_notify_when_idle(rig, capsys):
+    claude = FakeClaude(rig.config_dir / "sessions", rig.tmp / "socks", name="claude-main")
+    try:
+        assert rig.run_subprocess("start", "-n", "helper", "-C", str(rig.tmp)).returncode == 0
+        done = rig.run_subprocess("notify", "helper")
+    finally:
+        claude.close()
+    assert done.returncode == 2
+    assert "notify_when_idle" in done.stderr
 
 
 def test_status_stop_resume_and_name_round_trip(rig, capsys):

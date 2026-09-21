@@ -106,7 +106,6 @@ class Daemon:
         self._rawlog = rawlog
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
-        self._first_turn_effort: dict[str, str] = {}
         self._inbox: asyncio.Queue = asyncio.Queue()
         self.epoch = next(Daemon._epochs)
         self.codex_version: str | None = None
@@ -163,7 +162,7 @@ class Daemon:
     # --- thread verbs -------------------------------------------------------
 
     async def thread_start(self, cwd: str, name: str, read_only: bool, model: str | None,
-                           effort: str | None, review_by_parent: bool = False) -> dict:
+                           review_by_parent: bool = False) -> dict:
         params = {
             "cwd": cwd,
             "approvalPolicy": "on-request",
@@ -176,11 +175,7 @@ class Daemon:
         if model is not None:
             params["model"] = model
         result = await self.request("thread/start", params)
-        thread_id = result["thread"]["id"]
-        if effort is not None:
-            # The schema applies a turn's effort to the turns after it, so one send is enough.
-            self._first_turn_effort[thread_id] = effort
-        await self.set_name(thread_id, name)
+        await self.set_name(result["thread"]["id"], name)
         return result
 
     async def thread_resume(self, thread_id: str) -> dict:
@@ -197,15 +192,15 @@ class Daemon:
             return turns[0]["id"]
         return None
 
-    async def turn_start(self, thread_id: str, text: str, sandbox_policy: dict | None, client_id: str) -> dict:
+    async def turn_start(self, thread_id: str, text: str, sandbox_policy: dict | None, client_id: str,
+                         effort: str | None = None) -> dict:
         params = {"threadId": thread_id, "input": [{"type": "text", "text": text}], "clientUserMessageId": client_id}
         if sandbox_policy is not None:
             params["sandboxPolicy"] = sandbox_policy
-        if thread_id in self._first_turn_effort:
-            params["effort"] = self._first_turn_effort[thread_id]
-        result = await self.request("turn/start", params)
-        self._first_turn_effort.pop(thread_id, None)
-        return result
+        if effort is not None:
+            # The schema applies a turn's effort to the turns after it, so the caller sends it once.
+            params["effort"] = effort
+        return await self.request("turn/start", params)
 
     async def turn_steer(self, thread_id: str, turn_id: str, text: str, client_id: str) -> dict:
         return await self.request("turn/steer", {
@@ -296,8 +291,8 @@ class Daemon:
                 log.exception("handler raised on %s", text)
 
 
-async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | None) -> Delivery:
-    """Get `text` into the thread: steer the active turn, or start a new one.
+async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | None, effort: str | None = None) -> Delivery:
+    """Get `text` into the thread: steer the active turn, or start a new one (with `effort`).
 
     The daemon unloads idle threads and turns end between a status read and the
     call that acts on it, so each of those races is handled once; anything else
@@ -319,12 +314,12 @@ async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | N
         except DaemonError as e:
             d.note("codex.deliver", {"rung": "steer-refused", "threadId": thread_id, "error": e.error})
     try:
-        result = await d.turn_start(thread_id, text, sandbox_policy, client_id)
+        result = await d.turn_start(thread_id, text, sandbox_policy, client_id, effort)
     except DaemonError as e:
         if _is_not_loaded(e):
             d.note("codex.deliver", {"rung": "not-loaded", "threadId": thread_id, "error": e.error})
             await d.thread_resume(thread_id)
-            result = await d.turn_start(thread_id, text, sandbox_policy, client_id)
+            result = await d.turn_start(thread_id, text, sandbox_policy, client_id, effort)
         elif _is_turn_active(e):
             d.note("codex.deliver", {"rung": "turn-active", "threadId": thread_id, "error": e.error})
             turn_id = await d.active_turn(thread_id)

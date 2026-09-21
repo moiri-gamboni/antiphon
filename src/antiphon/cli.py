@@ -14,8 +14,9 @@ import sys
 import time
 from pathlib import Path
 
-from antiphon import ipc
+from antiphon import ipc, tmux
 from antiphon.ipc import BridgeUnreachable, IpcError
+from antiphon.rawlog import RawLog
 from antiphon.state import ensure_home
 
 START_TIMEOUT = 3.0
@@ -132,6 +133,10 @@ def verb_start(args, client: Client) -> int:
         "review_by_parent": args.review_by_parent,
     })
     print(f"started {result['name']} ({result['thread_id']}) in {result['cwd']}")
+    if args.visible:
+        attached = _attach(client, result["thread_id"], result["name"])
+        if attached != 0:
+            return attached
     if not args.prompt:
         return 0
     return _send(client, result["thread_id"], " ".join(args.prompt), args.wait, args.timeout)
@@ -143,6 +148,10 @@ def verb_send(args, client: Client) -> int:
 
 def _send(client: Client, target: str, text: str, wait: bool, timeout: float | None) -> int:
     result = client.call("send", {"target": target, "text": text})
+    if result["kind"] == "sent":
+        # A labelled peer message: there is no turn of ours to wait for.
+        print("sent")
+        return 0
     if result["kind"] == "steered":
         print(f"steered {result['name']} (turn {result['turn_id']})")
     else:
@@ -192,10 +201,15 @@ def verb_status(args, client: Client) -> int:
 
 def verb_ls(args, client: Client) -> int:
     rows = client.call("ls")
+    me = next((row for row in rows if row["self"]), None)
+    if me is not None:
+        print(f"you are {me['name']}")
     table = [["NAME", "KIND", "STATUS", "CWD"]]
     for row in rows:
-        indent = "  " if row.get("parent") else ""
-        table.append([indent + str(row["name"]), row["kind"], str(row["status"]), str(row["cwd"])])
+        name = str(row["name"])
+        if row.get("parent"):
+            name = "  " + (f"{name} ({row['role']})" if row.get("role") else name)
+        table.append([name, row["kind"], str(row["status"]), str(row["cwd"])])
     widths = [max(len(line[i]) for line in table) for i in range(3)]
     marks = [" "] + ["*" if row["self"] else " " for row in rows]
     for mark, line in zip(marks, table):
@@ -219,7 +233,36 @@ def verb_resume(args, client: Client) -> int:
 
 def verb_name(args, client: Client) -> int:
     result = client.call("name", {"target": args.target, "new": args.new})
-    print(f"renamed {args.target} to {result['name']}")
+    print(f"renamed {result['former']} to {result['name']}")
+    return 0
+
+
+def verb_attach(args, client: Client) -> int:
+    info = client.call("status", {"target": args.target})
+    return _attach(client, info["thread_id"], info["name"])
+
+
+def _attach(client: Client, thread_id: str, name: str) -> int:
+    """Open the thread in a tmux window when there is one to open it in; else print the command."""
+    def run(argv, **kwargs):
+        rawlog = RawLog(client.home / "log" / "raw.jsonl")
+        rawlog.log("out", "tmux", argv)
+        done = subprocess.run(argv, **kwargs)
+        rawlog.log("in", "tmux", {"rc": done.returncode, "stdout": done.stdout, "stderr": done.stderr})
+        return done
+
+    try:
+        attached = tmux.attach(thread_id, name, run=run)
+    except tmux.TmuxError as e:
+        print(f"antiphon: {e}", file=sys.stderr)
+        return 2
+    print(attached.pane if attached.pane is not None else attached.command)
+    return 0
+
+
+def verb_notify(args, client: Client) -> int:
+    result = client.call("notify", {"target": args.target})
+    print(f"watching {result['name']}: its idle notice will arrive here as a message")
     return 0
 
 
@@ -234,6 +277,8 @@ VERBS = {
     "stop": verb_stop,
     "resume": verb_resume,
     "name": verb_name,
+    "attach": verb_attach,
+    "notify": verb_notify,
 }
 
 
@@ -252,6 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--no-report", action="store_true", help="do not deliver the final answer to the spawner at turn end")
     start.add_argument("--worktree", action="store_true", help="give the thread its own git worktree beside the repository")
     start.add_argument("--review-by-parent", action="store_true", help="escalations block until the spawner answers")
+    start.add_argument("--visible", action="store_true", help="then attach a terminal to it (see attach)")
     start.add_argument("--wait", action="store_true")
     start.add_argument("--timeout", type=float)
     start.add_argument("prompt", nargs="*")
@@ -271,9 +317,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("ls", help="every peer on this machine")
     sub.add_parser("stop", help="retire the thread as a peer (its transcript stays)").add_argument("target")
     sub.add_parser("resume", help="host a stopped or never-hosted thread again").add_argument("target")
-    name = sub.add_parser("name", help="rename a thread")
-    name.add_argument("target")
+    name = sub.add_parser("name", help="rename a thread (from inside a Codex thread, the thread itself when no target is given)")
+    name.add_argument("target", nargs="?")
     name.add_argument("new")
+    attach = sub.add_parser("attach", help="open the thread in a new tmux window, or print the command that resumes it")
+    attach.add_argument("target")
+    notify = sub.add_parser("notify", help="from inside a Codex thread: be messaged when a peer's turn ends")
+    notify.add_argument("target")
     return parser
 
 

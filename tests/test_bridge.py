@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -777,7 +778,7 @@ def test_name_renames_the_thread_on_the_daemon_and_in_state(short_tmp):
             return result, rig.fake.received("thread/name/set")[-1]["params"], status["name"]
 
     result, params, name = run(body())
-    assert result == {"name": "planner", "thread_id": THREAD_ID}
+    assert result == {"name": "planner", "thread_id": THREAD_ID, "former": "helper"}
     assert params == {"threadId": THREAD_ID, "name": "planner"}
     assert name == "planner"
 
@@ -1113,3 +1114,349 @@ def test_an_unknown_frame_is_logged_once_per_action(short_tmp, caplog):
     warnings = [r.getMessage() for r in caplog.records if "unknown frame" in r.getMessage()]
     assert len([w for w in warnings if "sandbox_probe" in w]) == 1
     assert len([w for w in warnings if "other_probe" in w]) == 1
+
+
+# --- rename, Codex-side send and notify, the effort dial ---------------------------
+
+CODEX_ME = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread=THREAD_ID)
+CODEX_UNHOSTED = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread=None)
+OTHER_ID = "01a0c390-0000-7000-8000-000000000002"
+CAPTURED_IDLE_NOTICE = captured_frames("peer-frames-idle-notice.jsonl", "sent")[0]
+
+
+def second_thread_reply() -> dict:
+    return {"result": json.loads(json.dumps(THREAD_START.result(2)).replace(THREAD_ID, OTHER_ID))}
+
+
+def claude_caller(claude: FakeClaude) -> Caller:
+    return Caller(kind="claude", claude_pid=claude.pid, claude_session_id=claude.record["sessionId"], codex_thread=None)
+
+
+def child_sock(rig: Rig, thread_id: str) -> str:
+    return str(rig.tmp / "socks" / f"{rig.bridge.state.threads[thread_id].child_pid}.sock")
+
+
+def test_effort_is_sent_on_the_first_turn_even_after_a_daemon_reconnect(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(effort="high")
+            first_epoch = rig.bridge.daemon.epoch
+            await rig.fake.drop()
+            await until(lambda: rig.bridge.daemon is not None and rig.bridge.daemon.epoch > first_epoch)
+            await until(lambda: len(rig.fake.received("thread/resume")) == 1)
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "first"}, HUMAN)
+            await rig.fake.notify("turn/completed", for_thread(COMPLETED_NOTICE))
+            await until(lambda: rig.bridge.state.threads[THREAD_ID].status == "idle")
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "second"}, HUMAN)
+            return [r["params"] for r in rig.fake.received("turn/start")]
+
+    first, second = run(body())
+    assert first["effort"] == "high"
+    assert "effort" not in second
+
+
+def test_rename_dedupes_against_a_live_claude_record(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks", name="planner")
+            try:
+                await rig.start_thread(name="helper")
+                result = await rig.bridge.dispatch("name", {"target": "helper", "new": "planner"}, HUMAN)
+                return result, rig.fake.received("thread/name/set")[-1]["params"]
+            finally:
+                claude.close()
+
+    result, params = run(body())
+    assert result["name"] == "planner-2"
+    assert params == {"threadId": THREAD_ID, "name": "planner-2"}
+
+
+def test_a_codex_caller_without_a_target_renames_its_own_thread(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(name="helper")
+            result = await rig.bridge.dispatch("name", {"target": None, "new": "planner"}, CODEX_ME)
+            with pytest.raises(ipc.IpcError) as unhosted:
+                await rig.bridge.dispatch("name", {"target": None, "new": "x"}, CODEX_UNHOSTED)
+            return result, rig.bridge.state.threads[THREAD_ID].name, unhosted.value.kind
+
+    result, name, kind = run(body())
+    assert result == {"name": "planner", "thread_id": THREAD_ID, "former": "helper"}
+    assert name == "planner"
+    assert kind == "precondition"
+
+
+def test_a_codex_caller_renames_the_threads_it_spawned_but_not_others(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(name="helper")
+            rig.fake.replies["thread/start"] = second_thread_reply()
+            await rig.start_thread(name="other", caller=HUMAN)
+            with pytest.raises(ipc.IpcError) as forbidden:
+                await rig.bridge.dispatch("name", {"target": "other", "new": "mine"}, CODEX_ME)
+            rig.bridge.state.threads[OTHER_ID].spawner = THREAD_ID
+            allowed = await rig.bridge.dispatch("name", {"target": "other", "new": "mine"}, CODEX_ME)
+            return forbidden.value, allowed
+
+    error, allowed = run(body())
+    assert error.kind == "forbidden"
+    assert "codex caller" in error.message
+    assert allowed == {"name": "mine", "thread_id": OTHER_ID, "former": "other"}
+
+
+def test_a_codex_caller_sends_to_a_claude_session_as_a_labelled_message(short_tmp, monkeypatch):
+    from antiphon import peers
+
+    monkeypatch.setattr(peers, "RECEIPT_WAIT", 0.3)
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread(name="helper")
+                result = await rig.bridge.dispatch("send", {"target": "claude-main", "text": "hello there"}, CODEX_ME)
+                [frame] = await asyncio.to_thread(claude.wait_for_frames, 1, 2.0)
+                return result, frame, rig.fake.received("turn/start")
+            finally:
+                claude.close()
+
+    result, frame, turns = run(body())
+    assert result["kind"] == "sent"
+    assert result["msg_id"] == frame["msg_id"]
+    assert frame["type"] == "user"
+    assert frame["message"]["content"].startswith('<cross-session-message from="uds:')
+    assert 'from-name="helper"' in frame["message"]["content"]
+    assert "\nhello there\n" in frame["message"]["content"]
+    assert turns == []
+
+
+def test_a_deliverys_awaiter_runs_before_the_childs_next_event_is_dispatched(short_tmp):
+    """A receipt that arrives in the same read as the child's `sent` must find the send
+    already waiting for it, so the reader yields to the awaiter before parsing on."""
+    from antiphon.bridge import PeerChild
+
+    class StubProc:
+        pid = 1
+        returncode = None
+
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+            self.stdin = type("Stdin", (), {"write": lambda self, data: None, "drain": staticmethod(_noop)})()
+
+        async def wait(self):
+            return 0
+
+    async def _noop():
+        pass
+
+    async def body():
+        events = []
+
+        async def on_event(thread_id, event):
+            events.append(event)
+
+        child = PeerChild(THREAD_ID, short_tmp / "peer.log", short_tmp / "cc", on_event)
+        child.proc = StubProc()
+        child._reader = asyncio.create_task(child._read())
+
+        async def sender():
+            # What a labelled send does: the events seen at the moment deliver() returns.
+            answer = await child.deliver("/nowhere.sock", "hi", "helper")
+            return answer, list(events)
+
+        sending = asyncio.create_task(sender())
+        await asyncio.sleep(0.01)
+        child.proc.stdout.feed_data(b'{"ev": "sent", "msg_id": "m1"}\n{"ev": "status", "orig_msg_id": "m1", "status": "held", "detail": "busy"}\n')
+        answer, seen_when_resumed = await sending
+        child.proc.stdout.feed_eof()
+        await child._reader
+        return answer, seen_when_resumed, events
+
+    answer, seen_when_resumed, events = run(body())
+    assert answer == {"ev": "sent", "msg_id": "m1"}
+    assert seen_when_resumed == []
+    assert [e["ev"] for e in events] == ["status", "exited"]
+
+
+def test_a_send_the_child_cannot_write_is_a_delivery_error(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread(name="helper")
+                claude.listener.close()
+                with pytest.raises(ipc.IpcError) as info:
+                    await rig.bridge.dispatch("send", {"target": "claude-main", "text": "hello"}, CODEX_ME)
+                return info.value
+            finally:
+                claude.record_path.unlink()
+
+    error = run(body())
+    assert error.kind == "delivery_rejected"
+    assert "claude-main" in error.message and "FileNotFoundError" in error.message
+
+
+def test_a_negative_receipt_within_the_wait_is_a_delivery_error(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread(name="helper")
+                sending = asyncio.create_task(rig.bridge.dispatch("send", {"target": "claude-main", "text": "hello"}, CODEX_ME))
+                [frame] = await asyncio.to_thread(claude.wait_for_frames, 1, 2.0)
+                # No negative receipt from a real Claude session is captured; this is the
+                # shape the peer child parses, built the way the peer tests build it.
+                held = {
+                    "type": "control",
+                    "action": "peer_message_status",
+                    "orig_msg_id": frame["msg_id"],
+                    "status": "held",
+                    "drop_reason": "session is busy with a permission prompt",
+                    "from": f"uds:{claude.sock_path}",
+                    "msgV": 1,
+                    "msg_id": str(uuid.uuid4()),
+                }
+                await asyncio.to_thread(send_frame, child_sock(rig, THREAD_ID), held)
+                with pytest.raises(ipc.IpcError) as info:
+                    await asyncio.wait_for(sending, 5)
+                return info.value
+            finally:
+                claude.close()
+
+    error = run(body())
+    assert error.kind == "delivery_rejected"
+    assert "held" in error.message and "permission prompt" in error.message
+
+
+def test_a_codex_caller_sends_to_another_codex_thread_through_its_child(short_tmp, monkeypatch):
+    from antiphon import peers
+
+    monkeypatch.setattr(peers, "RECEIPT_WAIT", 0.3)
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread(name="helper")
+                rig.fake.replies["thread/start"] = second_thread_reply()
+                await rig.start_thread(name="other")
+                result = await rig.bridge.dispatch("send", {"target": "other", "text": "ping"}, CODEX_ME)
+                turn_start = await asyncio.wait_for(rig.fake.wait_request("turn/start"), 5)
+                return result, turn_start["params"], claude.frames
+            finally:
+                claude.close()
+
+    result, params, claude_frames = run(body())
+    assert result["kind"] == "sent"
+    assert params["threadId"] == OTHER_ID
+    assert params["input"] == [{"type": "text", "text": "[from helper via antiphon]\nping"}]
+    assert claude_frames == []
+
+
+def test_a_codex_caller_sends_directly_to_a_thread_it_spawned(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(name="helper")
+            rig.fake.replies["thread/start"] = second_thread_reply()
+            await rig.start_thread(name="child", caller=CODEX_ME)
+            result = await rig.bridge.dispatch("send", {"target": "child", "text": "go"}, CODEX_ME)
+            return result, rig.fake.received("turn/start")[0]["params"]
+
+    result, params = run(body())
+    assert result["kind"] == "started"
+    assert params["threadId"] == OTHER_ID
+    assert params["input"] == [{"type": "text", "text": "go"}]
+
+
+def test_a_codex_caller_outside_a_hosted_thread_cannot_send_a_labelled_message(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread(name="helper")
+                with pytest.raises(ipc.IpcError) as info:
+                    await rig.bridge.dispatch("send", {"target": "claude-main", "text": "x"}, CODEX_UNHOSTED)
+                return info.value
+            finally:
+                claude.close()
+
+    error = run(body())
+    assert error.kind == "precondition"
+    assert "CODEX_THREAD_ID" in error.message
+
+
+def test_a_claude_caller_sending_to_a_claude_session_is_told_to_use_send_message(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                with pytest.raises(ipc.IpcError) as info:
+                    await rig.bridge.dispatch("send", {"target": "claude-main", "text": "x"}, claude_caller(claude))
+                return info.value
+            finally:
+                claude.close()
+
+    error = run(body())
+    assert error.kind == "usage"
+    assert "SendMessage" in error.message
+
+
+def test_notify_subscribes_to_the_peer_and_relays_its_idle_notice_as_a_turn(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread(name="helper")
+                result = await rig.bridge.dispatch("notify", {"target": "claude-main"}, CODEX_ME)
+                [subscribe] = await asyncio.to_thread(claude.wait_for_frames, 1, 2.0)
+                notice = dict(CAPTURED_IDLE_NOTICE, orig_msg_id=subscribe["msg_id"])
+                notice["from"] = f"uds:{claude.sock_path}"
+                await asyncio.to_thread(send_frame, child_sock(rig, THREAD_ID), notice)
+                turn_start = await asyncio.wait_for(rig.fake.wait_request("turn/start"), 5)
+                return result, subscribe, turn_start["params"]
+            finally:
+                claude.close()
+
+    result, subscribe, params = run(body())
+    assert result == {"name": "claude-main"}
+    assert subscribe["action"] == "notify_when_idle"
+    assert params["threadId"] == THREAD_ID
+    assert params["input"] == [{"type": "text", "text": f"Peer claude-main is idle: {CAPTURED_IDLE_NOTICE['detail']}"}]
+
+
+def test_a_claude_caller_running_notify_is_told_to_use_notify_when_idle(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            claude = FakeClaude(rig.sessions_dir, short_tmp / "socks")
+            try:
+                await rig.start_thread(name="helper")
+                with pytest.raises(ipc.IpcError) as info:
+                    await rig.bridge.dispatch("notify", {"target": "helper"}, claude_caller(claude))
+                return info.value
+            finally:
+                claude.close()
+
+    error = run(body())
+    assert error.kind == "usage"
+    assert "notify_when_idle" in error.message
+
+
+def test_ls_rows_carry_a_sub_agents_nickname_and_role(short_tmp):
+    parent = copy.deepcopy(ADOPTION.result(2))
+    parent["thread"]["id"] = SUB_AGENT_PARENT
+    parent["thread"]["name"] = "orchestrator"
+    sub = copy.deepcopy(SUB_AGENT.result(2, occurrence=1))
+    sub["thread"]["agentRole"] = "reviewer"
+
+    def read(params):
+        return {"result": sub if params["threadId"] == SUB_AGENT_ID else parent}
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/read"] = read
+            rig.fake.replies["thread/loaded/list"] = {"result": {"data": [SUB_AGENT_ID, SUB_AGENT_PARENT], "nextCursor": None}}
+            await rig.bridge.reconcile()
+            return await rig.bridge.dispatch("ls", {}, HUMAN)
+
+    [_, row] = run(body())
+    assert (row["name"], row["role"], row["parent"]) == ("Bernoulli", "reviewer", "orchestrator")

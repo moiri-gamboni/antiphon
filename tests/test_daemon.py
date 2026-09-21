@@ -343,7 +343,7 @@ def test_thread_start_sends_the_headless_thread_parameters_then_names_the_thread
         async with Harness(tmp_path) as h:
             h.fake.replies["thread/start"] = {"result": THREAD_START.result(2)}
             h.fake.replies["thread/name/set"] = {"result": {}}
-            result = await h.daemon.thread_start("/tmp/work", "helper", read_only=False, model=None, effort=None)
+            result = await h.daemon.thread_start("/tmp/work", "helper", read_only=False, model=None)
             return result, h.fake.received("thread/start")[0]["params"], h.fake.received("thread/name/set")[0]["params"]
 
     result, start_params, name_params = run(body())
@@ -365,7 +365,7 @@ def test_thread_start_read_only_model_and_parent_review_map_to_their_parameters(
         async with Harness(tmp_path) as h:
             h.fake.replies["thread/start"] = {"result": THREAD_START.result(2)}
             h.fake.replies["thread/name/set"] = {"result": {}}
-            await h.daemon.thread_start("/tmp/work", "helper", read_only=True, model="gpt-5.6-terra", effort=None, review_by_parent=True)
+            await h.daemon.thread_start("/tmp/work", "helper", read_only=True, model="gpt-5.6-terra", review_by_parent=True)
             return h.fake.received("thread/start")[0]["params"]
 
     params = run(body())
@@ -374,14 +374,11 @@ def test_thread_start_read_only_model_and_parent_review_map_to_their_parameters(
     assert params["approvalsReviewer"] == "user"
 
 
-def test_effort_is_sent_on_the_threads_first_turn_only(tmp_path):
+def test_turn_start_sends_the_effort_only_when_given(tmp_path):
     async def body():
         async with Harness(tmp_path) as h:
-            h.fake.replies["thread/start"] = {"result": THREAD_START.result(2)}
-            h.fake.replies["thread/name/set"] = {"result": {}}
             h.fake.replies["turn/start"] = {"result": TURN_STARTED}
-            await h.daemon.thread_start("/tmp/work", "helper", read_only=False, model=None, effort="high")
-            await h.daemon.turn_start(THREAD_ID, "first", None, "c1")
+            await h.daemon.turn_start(THREAD_ID, "first", None, "c1", effort="high")
             await h.daemon.turn_start(THREAD_ID, "second", None, "c2")
             return [r["params"] for r in h.fake.received("turn/start")]
 
