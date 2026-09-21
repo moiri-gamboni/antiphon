@@ -612,6 +612,38 @@ def test_approve_falls_back_to_a_message_when_the_daemon_rejects_the_override(sh
     assert resolved is True
 
 
+def test_approve_leaves_the_record_open_when_the_retry_cannot_be_delivered(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/approveGuardianDeniedAction"] = {"result": {}}
+            rig.fake.replies["turn/start"] = {"error": {"code": -32600, "message": "turn refused"}}
+            await rig.start_thread()
+            await denied(rig)
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.bridge.dispatch("approve", {"token": DENIED_TOKEN}, rig.caller)
+            return info.value, rig.bridge.state.threads[THREAD_ID].pending[0]["resolved"]
+
+    error, resolved = run(body())
+    assert error.kind == "delivery_rejected"
+    assert "antiphon send helper" in error.message
+    assert resolved is False
+
+
+def test_deny_leaves_the_record_open_when_the_message_cannot_be_delivered(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["turn/start"] = {"error": {"code": -32600, "message": "turn refused"}}
+            await rig.start_thread()
+            await denied(rig)
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.bridge.dispatch("deny", {"token": DENIED_TOKEN, "why": "no"}, rig.caller)
+            return info.value.kind, rig.bridge.state.threads[THREAD_ID].pending[0]["resolved"]
+
+    kind, resolved = run(body())
+    assert kind == "delivery_rejected"
+    assert resolved is False
+
+
 def test_approve_resumes_an_unloaded_thread_before_the_override(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

@@ -284,21 +284,25 @@ class Approvals:
             retry = f"I approve running `{record.command}` in `{record.cwd}`: retry it now."
         else:
             retry = f"The action `{record.command}` that the reviewer denied is now approved: retry it now."
-        self._resolve(thread, record)
         await self._tell(thread, retry)
+        self._resolve(thread, record)
         return self._reply(thread, record)
 
     async def op_deny(self, args: dict, caller: Caller) -> dict:
         thread, record = self._unresolved(args["token"])
         why = args["why"]
+        told = f"The action `{record.command}` stays denied: {why}"
         if record.kind == "request":
             # Whether the daemon accepts `decline` is not captured; the captured requests
             # offer only accept, acceptWithExecpolicyAmendment and cancel.
             decision = "decline" if "decline" in record.available_decisions else "cancel"
             await self._answer(thread, record, {"decision": decision})
+            await self._tell(thread, told)
         else:
+            # No irreversible daemon call here, so resolve only once the thread has been told;
+            # a failed delivery leaves the token live to retry.
+            await self._tell(thread, told)
             self._resolve(thread, record)
-        await self._tell(thread, f"The action `{record.command}` stays denied: {why}")
         return self._reply(thread, record)
 
     async def _answer(self, thread: ThreadState, record: Pending, result: dict) -> None:
@@ -336,7 +340,12 @@ class Approvals:
         try:
             await self.bridge._deliver_into(thread, text)
         except DaemonError as e:
-            raise IpcError("delivery_rejected", f"{e.method}: {e.error.get('message')}", e.error) from e
+            raise IpcError(
+                "delivery_rejected",
+                f"could not tell {thread.name} the outcome ({e.error.get('message')}); the token is still open — "
+                f"retry, or say it yourself: antiphon send {thread.name} -- <instruction>",
+                e.error,
+            ) from e
 
     @staticmethod
     def _reply(thread: ThreadState, record: Pending) -> dict:
