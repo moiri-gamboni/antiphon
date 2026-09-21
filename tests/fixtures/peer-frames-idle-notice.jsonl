@@ -1,0 +1,8 @@
+{"t": 1789988252.3000627, "kind": "registered", "data": {"pid": 1001, "sessionId": "ce3f0f2d-dbc5-44d2-8e3a-fbdfb42ec90e", "cwd": "/tmp", "startedAt": 1789988252299, "procStart": "3210846", "version": "2.1.278", "peerProtocol": 1, "peerFeatures": ["notify_idle"], "kind": "interactive", "entrypoint": "cli", "pidDomain": "linux:00000000000000000000000000000000:pid:[4026531836]", "messagingSocketPath": "/run/user/1000/cc-socks/1001.sock", "name": "codex-stub", "nameSource": "user", "nameSince": 1789988252299, "status": "idle", "updatedAt": 1789988252299, "statusUpdatedAt": 1789988252299}}
+{"t": 1789988259.1665337, "kind": "connect", "data": {"peer_pid": 1002, "peer_uid": 1000}}
+{"t": 1789988259.166759, "kind": "close", "data": {}}
+{"t": 1789988259.1744237, "kind": "connect", "data": {"peer_pid": 1002, "peer_uid": 1000}}
+{"t": 1789988259.1749694, "kind": "frame", "data": {"type": "control", "action": "notify_when_idle", "from": "uds:/run/user/1000/cc-socks/1002.sock", "from_mode": "prompting", "msgV": 1, "msg_id": "6da3f2bb-cae8-4803-bb87-ee4dcda27f87"}}
+{"t": 1789988259.1753259, "kind": "close", "data": {}}
+{"t": 1789988266.0683262, "kind": "sent", "data": {"to": "/run/user/1000/cc-socks/1002.sock", "frame": {"type": "control", "action": "peer_idle_notice", "orig_msg_id": "6da3f2bb-cae8-4803-bb87-ee4dcda27f87", "state": "idle", "finished_at": 1789988266068, "detail": "stub finished its pretend turn", "from": "uds:/run/user/1000/cc-socks/1001.sock", "from_mode": "prompting", "msgV": 1, "msg_id": "b3e0047a-48cd-49eb-b1d6-c00751b079ce"}}}
+{"t": 1789988318.0331125, "kind": "exit", "data": {}}

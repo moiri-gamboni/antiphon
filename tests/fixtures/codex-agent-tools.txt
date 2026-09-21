@@ -1,0 +1,21 @@
+wait: Waits on a yielded `exec` cell and returns new output or completion.
+request_user_input: Request user input for one to three short questions and wait for the response.
+exec: Run JavaScript code to orchestrate/compose tool calls.
+apply_patch: The `apply_patch` tool can be used to edit files.
+create_goal: Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.
+exec_command: Runs a command in a PTY, returning output or a session ID for ongoing interaction.
+get_goal: Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.
+list_mcp_resource_templates: Lists resource templates provided by MCP servers.
+list_mcp_resources: Lists resources provided by MCP servers.
+read_mcp_resource: Read a specific resource from an MCP server given the server name and resource URI.
+request_plugin_install: Suggest a recommended plugin installation
+update_goal: Update the existing goal.
+view_image: View a local image file from the filesystem when visual inspection is needed.
+write_stdin: Writes characters to an existing unified exec session and returns recent output.
+web__run: Tool for accessing the internet.
+spawn_agent: Spawns an agent to work on the specified task.
+followup_task: Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle.
+interrupt_agent: Interrupt an agent's current turn, if any, and return its previous status.
+list_agents: List live agents in the current root thread tree.
+send_message: Send a message to an existing agent.
+wait_agent: Wait for a mailbox update from any live agent, including queued messages and final-status notifications.
