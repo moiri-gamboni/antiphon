@@ -572,7 +572,9 @@ class Bridge:
                 await self._refresh_adopted(d, thread, loaded)
             elif self.subscribed.get(thread.thread_id) != d.epoch and thread.status != "unloaded":
                 await self._subscribe(d, thread)
-        known = set(self.state.threads) | {s for t in self.state.threads.values() for s in t.sub_agents}
+        # A stopped thread stays loaded on the daemon until its own idle timer; it is known,
+        # just not hosted, and must not be adopted back until the user resumes it.
+        known = set(self.state.threads) | set(self.state.stopped.values()) | {s for t in self.state.threads.values() for s in t.sub_agents}
         unknown = [tid for tid in loaded if tid not in known]
         if unknown:
             await self._adopt(d, unknown)

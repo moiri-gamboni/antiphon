@@ -715,6 +715,27 @@ def test_stop_interrupts_unsubscribes_and_retires_the_thread(short_tmp):
     assert f"antiphon resume {THREAD_ID}" in error.message
 
 
+def test_a_stopped_thread_is_not_readopted_while_the_daemon_still_lists_it(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(name="helper", caller=CLAUDE)
+            await rig.bridge.dispatch("stop", {"target": "helper"}, CLAUDE)
+            # The daemon keeps the thread loaded after unsubscribe; a reconcile pass must
+            # not adopt a thread the user stopped.
+            rig.fake.replies["thread/loaded/list"] = {"result": {"data": [THREAD_ID], "nextCursor": None}}
+            rig.fake.replies["thread/read"] = {"result": {"thread": {"id": THREAD_ID, "cwd": str(rig.tmp / "work"), "name": "helper", "status": {"type": "idle"}}}}
+            await rig.bridge.reconcile()
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.bridge.dispatch("send", {"target": "helper", "text": "again"}, CLAUDE)
+            return list(rig.bridge.state.threads), rig.bridge.state.stopped, info.value
+
+    threads, stopped, error = run(body())
+    assert threads == []
+    assert stopped == {"helper": THREAD_ID}
+    assert error.kind == "stopped"
+    assert f"antiphon resume {THREAD_ID}" in error.message
+
+
 def test_stop_removes_a_clean_worktree_and_keeps_a_dirty_one(short_tmp):
     repo = short_tmp / "myrepo"
     repo.mkdir()
