@@ -238,14 +238,10 @@ class Bridge:
             "thread/closed": self.on_thread_closed,
             "thread/name/updated": self.on_thread_name_updated,
             "error": self.on_error,
-            "item/autoApprovalReview/started": self.log_notification,
-            "item/autoApprovalReview/completed": self.log_notification,
         }
         self.child_events = {
             "inbound": self.on_child_inbound,
             "send_failed": self.on_child_send_failed,
-            "status": self.log_child_event,
-            "idle_notice": self.log_child_event,
             "subscribed": self.log_child_event,
             "unknown_frame": self.on_child_unknown_frame,
             "exited": self.on_child_exited,
@@ -438,9 +434,6 @@ class Bridge:
         await self.daemon.respond_error(request_id, METHOD_NOT_FOUND, f"antiphon does not answer {method}")
 
     # --- notifications ----------------------------------------------------------------
-
-    async def log_notification(self, params) -> None:
-        log.info("notification: %s", json.dumps(params)[:1000])
 
     async def on_thread_started(self, params) -> None:
         thread = params["thread"]
