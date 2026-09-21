@@ -486,10 +486,17 @@ class BridgeThread:
 
 @pytest.fixture
 def codex_rig(rig, monkeypatch):
-    """The CLI rig with a Claude session present and every CLI call classified as coming
-    from the hosted thread `helper`."""
+    """The CLI rig with a Claude session present, the thread `helper` already hosted, and
+    every CLI call classified as coming from it — a Codex thread acting through antiphon."""
+    from antiphon.callers import Caller
+
     claude = FakeClaude(rig.config_dir / "sessions", rig.tmp / "socks", name="claude-main")
     bridge = BridgeThread(rig)
+    human = Caller(kind="human", claude_pid=None, claude_session_id=None, codex_thread=None)
+    args = dict(cwd=str(rig.tmp), name="helper", read_only=False, report=True, worktree=False, review_by_parent=False)
+    # Host the caller's own thread first (a Codex thread is spawned by someone else before it
+    # can act); only then is the Codex caller recognised rather than owning nothing.
+    asyncio.run_coroutine_threadsafe(bridge.bridge.dispatch("start", args, human), bridge.loop).result(5)
     monkeypatch.setenv("CODEX_THREAD_ID", THREAD_ID)
     rig.claude = claude
     try:
@@ -501,7 +508,6 @@ def codex_rig(rig, monkeypatch):
 
 def test_a_codex_caller_sees_its_own_name_in_the_ls_header(codex_rig, capsys):
     rig = codex_rig
-    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
     code, out, err = rig.run("ls", capsys=capsys)
     assert code == 0
     assert out.splitlines()[0] == "you are helper"
@@ -510,7 +516,6 @@ def test_a_codex_caller_sees_its_own_name_in_the_ls_header(codex_rig, capsys):
 
 def test_a_codex_caller_renames_itself_without_naming_a_target(codex_rig, capsys):
     rig = codex_rig
-    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
     code, out, err = rig.run("name", "planner", capsys=capsys)
     assert (code, out) == (0, "renamed helper to planner\n")
     assert rig.daemon.received("thread/name/set")[-1]["params"] == {"threadId": THREAD_ID, "name": "planner"}
@@ -521,7 +526,6 @@ def test_a_codex_caller_sends_to_a_claude_session_and_is_told_sent(codex_rig, ca
 
     monkeypatch.setattr(peers, "RECEIPT_WAIT", 0.3)
     rig = codex_rig
-    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
     code, out, err = rig.run("send", "claude-main", "--", "hello from codex", capsys=capsys)
     assert (code, out) == (0, "sent\n")
     [frame] = rig.claude.wait_for_frames(1)
@@ -531,7 +535,6 @@ def test_a_codex_caller_sends_to_a_claude_session_and_is_told_sent(codex_rig, ca
 
 def test_a_codex_caller_subscribes_to_a_peers_idle_notice(codex_rig, capsys):
     rig = codex_rig
-    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
     code, out, err = rig.run("notify", "claude-main", capsys=capsys)
     assert code == 0
     assert "claude-main" in out

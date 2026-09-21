@@ -225,6 +225,32 @@ def test_start_with_worktree_outside_a_repository_is_a_precondition_error(short_
 # --- send, wait, interrupt ------------------------------------------------------
 
 
+def test_start_from_an_unrecognised_codex_caller_is_refused(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.start_thread(caller=CODEX_UNHOSTED)
+            return info.value, rig.methods()
+
+    error, methods = run(body())
+    assert error.kind == "precondition"
+    assert "CODEX_THREAD_ID" in error.message
+    assert "thread/start" not in methods
+
+
+def test_resume_from_an_unrecognised_codex_caller_is_refused(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            with pytest.raises(ipc.IpcError) as info:
+                await rig.bridge.dispatch("resume", {"target": "01a0c399-780c-73f3-9209-e09112a796a0"}, CODEX_UNHOSTED)
+            return info.value, rig.methods()
+
+    error, methods = run(body())
+    assert error.kind == "precondition"
+    assert "CODEX_THREAD_ID" in error.message
+    assert "thread/resume" not in methods
+
+
 def test_send_on_an_idle_spawned_thread_starts_a_turn_with_the_network_enabled_sandbox(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

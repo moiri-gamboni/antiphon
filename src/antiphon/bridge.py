@@ -930,7 +930,15 @@ class Bridge:
             "degraded": self.state.degraded,
         }
 
+    def _require_known_codex_caller(self, caller: Caller) -> None:
+        """A Codex caller whose thread the bridge does not know owns nothing; recording it
+        as a thread's spawner would drop the thread's reports and let any other unrecognised
+        Codex caller act on it, so it must run from a hosted thread."""
+        if caller.kind == "codex" and not caller.owner_id:
+            raise IpcError("precondition", "run this from a Codex thread antiphon hosts, or set CODEX_THREAD_ID")
+
     async def op_start(self, args: dict, caller: Caller) -> dict:
+        self._require_known_codex_caller(caller)
         d = await self._require_daemon()
         cwd = args["cwd"]
         wanted = args.get("name") or f"codex-{os.path.basename(cwd.rstrip('/'))}"
@@ -1095,6 +1103,7 @@ class Bridge:
         return reply
 
     async def op_resume(self, args: dict, caller: Caller) -> dict:
+        self._require_known_codex_caller(caller)
         target = args["target"]
         d = await self._require_daemon()
         thread_id = self._stopped_id(target) or target
