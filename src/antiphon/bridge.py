@@ -42,7 +42,7 @@ PINNED_METHODS = ("thread/loaded/list", "turn/steer", "thread/resume")
 METHOD_NOT_FOUND = -32601
 # Ops that act on one thread, gated by who spawned it.
 # `send` is absent: every caller may send, and its target may be a Claude session rather than a thread.
-OWNED_OPS = frozenset({"interrupt", "stop", "name", "approve", "deny", "wait", "status"})
+OWNED_OPS = frozenset({"interrupt", "stop", "name", "approve", "deny"})
 WAIT_DEFAULT_TIMEOUT = 600.0
 DAEMON_WAIT = 3.0
 REGISTER_TIMEOUT = 10.0
@@ -238,14 +238,10 @@ class Bridge:
             "thread/closed": self.on_thread_closed,
             "thread/name/updated": self.on_thread_name_updated,
             "error": self.on_error,
-            "item/autoApprovalReview/started": self.log_notification,
-            "item/autoApprovalReview/completed": self.log_notification,
         }
         self.child_events = {
             "inbound": self.on_child_inbound,
             "send_failed": self.on_child_send_failed,
-            "status": self.log_child_event,
-            "idle_notice": self.log_child_event,
             "subscribed": self.log_child_event,
             "unknown_frame": self.on_child_unknown_frame,
             "exited": self.on_child_exited,
@@ -340,7 +336,7 @@ class Bridge:
     def _check_ownership(self, op: str, args: dict, caller: Caller) -> None:
         """The ownership rule: a caller drives, stops and approves what it spawned; a
         Claude session or a human may do so to any thread."""
-        if op not in OWNED_OPS or (op in ("status", "name") and not args.get("target")):
+        if op not in OWNED_OPS or (op == "name" and not args.get("target")):
             return
         if op in ("approve", "deny"):
             thread, _ = self.approvals.find(args["token"])
@@ -348,7 +344,7 @@ class Bridge:
             thread = self.resolve(args["target"])
         # A Codex thread renaming itself is not acting on another caller's thread.
         spawner = None if op == "name" and thread.thread_id == caller.codex_thread else thread.spawner
-        if not callers.permits(caller, op, spawner):
+        if not callers.permits(caller, spawner):
             raise IpcError("forbidden", callers.forbidden_message(caller, op, spawner))
 
     def live_records(self) -> list[registry.Record]:
@@ -438,9 +434,6 @@ class Bridge:
         await self.daemon.respond_error(request_id, METHOD_NOT_FOUND, f"antiphon does not answer {method}")
 
     # --- notifications ----------------------------------------------------------------
-
-    async def log_notification(self, params) -> None:
-        log.info("notification: %s", json.dumps(params)[:1000])
 
     async def on_thread_started(self, params) -> None:
         thread = params["thread"]
@@ -898,8 +891,7 @@ class Bridge:
             thread_id = result["thread"]["id"]
             thread = ThreadState(
                 thread_id=thread_id, name=name, cwd=cwd, origin="spawned", spawner=caller.owner_id,
-                read_only=args["read_only"], report=args["report"], model=args.get("model"), effort=args.get("effort"),
-                review_by_parent=args["review_by_parent"], worktree=worktree,
+                read_only=args["read_only"], report=args["report"], effort=args.get("effort"), worktree=worktree,
             )
             self.state.threads[thread_id] = thread
             # thread/start subscribes the connection that made it.

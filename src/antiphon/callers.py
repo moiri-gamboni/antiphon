@@ -19,13 +19,6 @@ from typing import Literal, Protocol
 
 CallerKind = Literal["claude", "codex", "human"]
 
-# Verbs that never touch a specific thread's ownership: read-only, or apply
-# before any thread exists.
-_UNGATED_VERBS = frozenset({"start", "resume", "ls", "ping", "status", "wait"})
-
-# Verbs gated by ownership of a specific thread.
-_OWNER_VERBS = frozenset({"send", "interrupt", "stop", "name", "approve", "deny"})
-
 
 @dataclass(frozen=True)
 class Caller:
@@ -86,23 +79,14 @@ def classify(
     return Caller(kind="human", claude_pid=None, claude_session_id=None, codex_thread=None)
 
 
-def permits(caller: Caller, verb: str, spawner: str | None) -> bool:
-    """The ownership rule: whether `caller` may run `verb` on a thread spawned by `spawner`."""
-    if verb in _UNGATED_VERBS:
+def permits(caller: Caller, spawner: str | None) -> bool:
+    """The ownership rule, the same for every gated op: whether `caller` may act on a
+    thread spawned by `spawner` (`None` when the caller is acting on itself)."""
+    if spawner is None:
         return True
-    if verb == "notify":
-        return caller.kind == "codex"
-    if verb == "name" and spawner is None:
-        return True  # renaming self, not a thread
-    if verb not in _OWNER_VERBS:
-        return False  # a verb this module has no rule for yet: deny until one is added
     if caller.kind in ("claude", "human"):
         return True
-    if caller.kind == "codex":
-        if spawner == caller.owner_id:
-            return True
-        return verb == "send"
-    return False
+    return spawner == caller.owner_id
 
 
 def forbidden_message(caller: Caller, verb: str, spawner: str | None) -> str:

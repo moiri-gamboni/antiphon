@@ -56,10 +56,8 @@ class ThreadState:
     pending: list[dict] = field(default_factory=list)
     last_error: dict | None = None
     report: bool = True
-    model: str | None = None
     effort: str | None = None
     effort_sent: bool = False  # the effort dial goes on the first turn the bridge starts, whichever daemon connection that is
-    review_by_parent: bool = False
     worktree: str | None = None
     outcome: str | None = None  # the last turn's status: "completed" | "failed" | "interrupted"
     final: str | None = None  # the last turn's outcome text: its final answer or "<status>: <error>"

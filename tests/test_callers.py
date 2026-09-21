@@ -137,84 +137,27 @@ def test_classify_no_parent_chain_is_human():
 # --- permits: ownership rule --------------------------------------------------
 
 
-def test_permits_read_verbs_allowed_to_everyone():
-    for kind in ("claude", "codex", "human"):
-        caller = Caller(
-            kind=kind,
-            claude_pid=None,
-            claude_session_id="session-1" if kind == "claude" else None,
-            codex_thread="thread-1" if kind == "codex" else None,
-        )
-        for verb in ("start", "resume", "ls", "ping", "status", "wait"):
-            assert permits(caller, verb, "someone-else") is True
+def test_permits_a_codex_thread_only_on_the_threads_it_spawned():
+    caller = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread="thread-1")
+    assert permits(caller, "thread-1") is True
+    assert permits(caller, "thread-2") is False
 
 
 def test_permits_codex_with_unrecognised_thread_owns_nothing():
     caller = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread=None)
-    assert permits(caller, "approve", "thread-1") is False
-    assert permits(caller, "stop", "thread-1") is False
+    assert permits(caller, "thread-1") is False
 
 
-def test_permits_unrecognised_verb_denied_for_every_kind():
-    callers = (
-        Caller(kind="claude", claude_pid=1, claude_session_id="session-1", codex_thread=None),
-        Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread="thread-1"),
-        Caller(kind="human", claude_pid=None, claude_session_id=None, codex_thread=None),
-    )
-    for caller in callers:
-        assert permits(caller, "attach", None) is False
+def test_permits_a_claude_session_and_a_human_on_any_thread():
+    claude = Caller(kind="claude", claude_pid=123, claude_session_id="session-1", codex_thread=None)
+    human = Caller(kind="human", claude_pid=None, claude_session_id=None, codex_thread=None)
+    assert permits(claude, "thread-not-mine") is True
+    assert permits(human, "anything") is True
 
 
-def test_permits_codex_approve_on_unspawned_thread_forbidden():
-    caller = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread="thread-1")
-    assert permits(caller, "approve", "thread-2") is False
-
-
-def test_permits_codex_approve_on_own_thread_allowed():
-    caller = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread="thread-1")
-    assert permits(caller, "approve", "thread-1") is True
-
-
-def test_permits_claude_approve_on_any_thread_allowed():
-    caller = Caller(kind="claude", claude_pid=123, claude_session_id="session-1", codex_thread=None)
-    assert permits(caller, "approve", "thread-not-mine") is True
-
-
-def test_permits_codex_send_to_unspawned_thread_allowed():
-    caller = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread="thread-1")
-    assert permits(caller, "send", "thread-2") is True
-
-
-def test_permits_codex_stop_on_unspawned_thread_forbidden():
-    caller = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread="thread-1")
-    assert permits(caller, "stop", "thread-2") is False
-
-
-def test_permits_human_stop_on_anything_allowed():
-    caller = Caller(kind="human", claude_pid=None, claude_session_id=None, codex_thread=None)
-    assert permits(caller, "stop", "anything") is True
-
-
-def test_permits_notify_allowed_only_to_codex():
+def test_permits_any_caller_acting_on_itself():
     codex_caller = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread="thread-1")
-    claude_caller = Caller(kind="claude", claude_pid=1, claude_session_id="session-1", codex_thread=None)
-    human_caller = Caller(kind="human", claude_pid=None, claude_session_id=None, codex_thread=None)
-    assert permits(codex_caller, "notify", None) is True
-    assert permits(claude_caller, "notify", None) is False
-    assert permits(human_caller, "notify", None) is False
-
-
-def test_permits_name_self_allowed_to_codex():
-    codex_caller = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread="thread-1")
-    assert permits(codex_caller, "name", None) is True
-
-
-def test_permits_codex_interrupt_and_deny_follow_ownership():
-    caller = Caller(kind="codex", claude_pid=None, claude_session_id=None, codex_thread="thread-1")
-    assert permits(caller, "interrupt", "thread-2") is False
-    assert permits(caller, "deny", "thread-2") is False
-    assert permits(caller, "interrupt", "thread-1") is True
-    assert permits(caller, "deny", "thread-1") is True
+    assert permits(codex_caller, None) is True
 
 
 # --- forbidden_message --------------------------------------------------------

@@ -31,9 +31,8 @@ message received, `fake.notifications` every client notification
 
 `load_fixture(name)` parses a capture from `tests/fixtures/`: `.result(id)` /
 `.error(id)` return a daemon line by request id (`occurrence=` picks a later
-one when a capture spans two connections), `.replies` maps each method in a
-capture with `sent` lines to its replies in order, `.notifications(method)`
-returns the params of every notification with that method, and
+one when a capture spans two connections), `.notifications(method)` returns
+the params of every notification with that method, and
 `.server_requests(method)` every server request with that method.
 """
 import asyncio
@@ -53,12 +52,6 @@ class Fixture:
     def __init__(self, lines: list[dict]):
         self.messages = [line for line in lines if "sent" not in line and "note" not in line]
         self.sent = [line["sent"] for line in lines if "sent" in line]
-        methods_by_id = {m["id"]: m["method"] for m in self.sent if "id" in m}
-        self.replies: dict[str, list[dict]] = {}
-        for m in self.messages:
-            if "id" in m and "method" not in m and m["id"] in methods_by_id:
-                reply = {"result": m["result"]} if "result" in m else {"error": m["error"]}
-                self.replies.setdefault(methods_by_id[m["id"]], []).append(reply)
 
     def replies_to(self, request_id: int) -> list[dict]:
         """Every daemon reply with that id; more than one when a capture spans two connections."""

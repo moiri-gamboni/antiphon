@@ -37,10 +37,6 @@ REQUIRED_FIELDS = (
 )
 
 
-class NoLiveClaude(Exception):
-    """No registry record belongs to a running process."""
-
-
 @dataclass(frozen=True)
 class Record:
     path: Path
@@ -88,11 +84,7 @@ def ps_lstart(pid: int) -> str:
         capture_output=True,
         check=False,
     ).stdout
-    return parse_ps_lstart(out)
-
-
-def parse_ps_lstart(output: bytes) -> str:
-    return output.decode().strip()
+    return out.decode().strip()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -122,13 +114,6 @@ def live_records(directory: Path | None = None) -> list[Record]:
         if isinstance(pid, int) and _pid_alive(pid):
             records.append(Record(path, data))
     return records
-
-
-def socket_dir(directory: Path | None = None) -> str:
-    for record in live_records(directory):
-        if "messagingSocketPath" in record.data:
-            return os.path.dirname(record.socket_path)
-    raise NoLiveClaude("no live Claude Code session record to take the socket directory from")
 
 
 def pins_ok(record: Record, proc_root: Path | str = "/proc") -> list[str]:

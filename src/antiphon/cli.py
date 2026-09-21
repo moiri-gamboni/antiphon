@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from antiphon import ipc, tmux
+from antiphon import ipc
 from antiphon.ipc import BridgeUnreachable, IpcError
 from antiphon.rawlog import RawLog
 from antiphon.state import ensure_home
@@ -244,19 +245,19 @@ def verb_attach(args, client: Client) -> int:
 
 def _attach(client: Client, thread_id: str, name: str) -> int:
     """Open the thread in a tmux window when there is one to open it in; else print the command."""
-    def run(argv, **kwargs):
-        rawlog = RawLog(client.home / "log" / "raw.jsonl")
-        rawlog.log("out", "tmux", argv)
-        done = subprocess.run(argv, **kwargs)
-        rawlog.log("in", "tmux", {"rc": done.returncode, "stdout": done.stdout, "stderr": done.stderr})
-        return done
-
-    try:
-        attached = tmux.attach(thread_id, name, run=run)
-    except tmux.TmuxError as e:
-        print(f"antiphon: {e}", file=sys.stderr)
+    command = f"codex resume {shlex.quote(thread_id)}"
+    if "TMUX" not in os.environ:
+        print(command)
+        return 0
+    argv = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_id}.#{pane_id}", "-n", name, command]
+    rawlog = RawLog(client.home / "log" / "raw.jsonl")
+    rawlog.log("out", "tmux", argv)
+    done = subprocess.run(argv, capture_output=True, text=True, check=False)
+    rawlog.log("in", "tmux", {"rc": done.returncode, "stdout": done.stdout, "stderr": done.stderr})
+    if done.returncode != 0:
+        print(f"antiphon: tmux exited {done.returncode}: {done.stderr}", file=sys.stderr)
         return 2
-    print(attached.pane if attached.pane is not None else attached.command)
+    print(done.stdout.strip())
     return 0
 
 

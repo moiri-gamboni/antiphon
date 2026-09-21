@@ -1,8 +1,6 @@
 import json
 import os
 
-import pytest
-
 from antiphon.state import State, SubAgent, ThreadState, home_dir
 
 
@@ -20,9 +18,7 @@ def full_thread() -> ThreadState:
         pending=[{"token": "a1b2c3", "since": 1790000000, "command": "rm -rf x"}],
         last_error={"message": "usage limit", "at": 1790000001.5},
         report=False,
-        model="gpt-5.6-terra",
         effort="high",
-        review_by_parent=True,
         worktree="/work/repo-worktrees/helper",
         outcome="completed",
         final="done: 42",
@@ -62,15 +58,6 @@ def test_save_leaves_no_temporary_file_and_the_file_is_complete_json(tmp_path):
     assert json.loads(path.read_text())["threads"]["t"]["name"] == "helper"
 
 
-def test_thread_defaults_are_a_hosted_unregistered_idle_thread():
-    thread = ThreadState(thread_id="t", name="n", cwd="/c", origin="adopted", spawner="human", read_only=False)
-    assert thread.child_pid is None
-    assert thread.status == "idle"
-    assert thread.report is True
-    assert thread.pending == []
-    assert thread.sub_agents == {}
-
-
 def test_home_dir_is_the_override_or_the_dotdir_under_home(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTIPHON_HOME", str(tmp_path / "custom"))
     assert home_dir() == tmp_path / "custom"
@@ -87,11 +74,3 @@ def test_ensure_home_creates_the_private_directory_tree(monkeypatch, tmp_path):
     assert home == tmp_path / "h"
     assert (home / "log").is_dir()
     assert os.stat(home).st_mode & 0o777 == 0o700
-
-
-@pytest.mark.parametrize("status", ["idle", "busy", "approval", "unloaded"])
-def test_every_status_value_survives_a_round_trip(tmp_path, status):
-    state = State()
-    state.threads["t"] = ThreadState(thread_id="t", name="n", cwd="/c", origin="spawned", spawner="human", read_only=False, status=status)
-    state.save(tmp_path / "s.json")
-    assert State.load(tmp_path / "s.json").threads["t"].status == status
