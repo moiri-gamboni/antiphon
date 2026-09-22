@@ -19,6 +19,7 @@ REVIEW_DENIED = DENIED.notifications("item/autoApprovalReview/completed")[0]
 REVIEW_APPROVED = load_fixture("auto-review-approved.jsonl").notifications("item/autoApprovalReview/completed")[0]
 OVERRIDE_SENT = [m for m in load_fixture("guardian-override.jsonl").sent if m.get("method") == "thread/approveGuardianDeniedAction"][0]
 REQUEST = load_fixture("user-reviewer-request-approval.jsonl").server_requests("item/commandExecution/requestApproval")[0]
+DECLINE_REQUEST = load_fixture("decline.jsonl").server_requests("item/commandExecution/requestApproval")[0]
 TURN_STARTED_NOTICE = load_fixture("user-reviewer-request-approval.jsonl").notifications("turn/started")[0]
 COMPLETED_NOTICE = [n for n in load_fixture("permission-hook-order.jsonl").notifications("turn/completed") if n["turn"]["status"] == "completed"][0]
 
@@ -270,22 +271,20 @@ def test_approve_on_a_blocking_request_answers_accept_on_the_right_id(short_tmp)
     assert turn_starts == []
 
 
-# The captured requests offer accept, acceptWithExecpolicyAmendment and cancel; a request
-# offering decline is schema-only (no capture), so the decline case is provisional.
-@pytest.mark.parametrize("offered, decision", [
-    (REQUEST["params"]["availableDecisions"], "cancel"),
-    (["accept", "decline", "cancel"], "decline"),
-])
-def test_deny_on_a_blocking_request_answers_decline_when_offered_else_cancel_then_tells_the_thread_why(short_tmp, offered, decision):
+# `decline` is never in availableDecisions (the daemon offers accept,
+# acceptWithExecpolicyAmendment and cancel) yet decline.jsonl shows it accepted, and it
+# leaves the turn running where cancel interrupts it.
+def test_deny_on_a_blocking_request_answers_decline_then_tells_the_thread_why(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
             await rig.start_thread(review_by_parent=True)
-            request_id, token = await blocked(rig, {**REQUEST["params"], "availableDecisions": offered})
+            request_id, token = await blocked(rig)
             await rig.bridge.dispatch("deny", {"token": token, "why": "stay in the workspace"}, rig.caller)
             return await answered(rig, request_id), rig.fake.received("turn/start")[0]["params"]["input"]
 
     answer, told = run(body())
-    assert answer == {"jsonrpc": "2.0", "id": 1, "result": {"decision": decision}}
+    assert "decline" not in DECLINE_REQUEST["params"]["availableDecisions"]
+    assert answer == {"jsonrpc": "2.0", "id": 1, "result": {"decision": "decline"}}
     assert told == [{"type": "text", "text": "The action `/bin/bash -lc 'touch ~/codex-escalation-probe-3'` stays denied: stay in the workspace"}]
 
 
@@ -678,7 +677,7 @@ def test_deny_on_a_blocking_request_whose_message_fails_names_the_manual_step(sh
     assert error.kind == "delivery_rejected"
     assert "antiphon send" in error.message
     assert "still open" not in error.message  # the decision reached the daemon; the token is closed
-    assert answer == {"jsonrpc": "2.0", "id": 1, "result": {"decision": "cancel"}}
+    assert answer == {"jsonrpc": "2.0", "id": 1, "result": {"decision": "decline"}}
 
 
 def test_deny_leaves_the_record_open_when_the_message_cannot_be_delivered(short_tmp):

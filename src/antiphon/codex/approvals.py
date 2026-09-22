@@ -366,10 +366,12 @@ class Approvals:
             return self._reply(thread, record)
         told = f"The action `{record.command}` stays denied: {why}"
         if record.kind == "request":
-            # Whether the daemon accepts `decline` is not captured; the captured requests
-            # offer only accept, acceptWithExecpolicyAmendment and cancel.
-            decision = "decline" if "decline" in record.available_decisions else "cancel"
-            await self._answer(thread, record, {"decision": decision})
+            # `decline` is never among the offered `availableDecisions` (accept,
+            # acceptWithExecpolicyAmendment, cancel) but the daemon accepts it all the same
+            # and resolves the request. Both refuse the command; `cancel` also interrupts
+            # the turn, while `decline` lets it run on, which is what leaves a turn to tell
+            # why the action stays denied.
+            await self._answer(thread, record, {"decision": "decline"})
             await self._tell(thread, told)
         else:
             # No irreversible daemon call here, so resolve only once the thread has been told;
