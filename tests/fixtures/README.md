@@ -160,6 +160,36 @@ What it pins, the case the bridge is in on an adopted thread it does not answer:
 
 Claude Code's peer protocol as seen by a stub peer: the registry record it wrote, an inbound `user` frame (`<cross-session-message from=... from-name=... from-mode=...>` body), the `notify_when_idle` control frame, and the `peer_message_status` and `peer_idle_notice` frames the stub sent back, the idle notice being the shape a Claude session rendered. `peer-frames.jsonl` also holds the stub's own outbound `user` frame to the Claude session (`kind: sent`) and one `sandbox_probe` control frame that a probe script running inside a Codex sandbox sent to the stub's socket; neither comes from Claude Code.
 
+### `claude-bg-session.jsonl`
+
+The registry record a background Claude Code session writes for itself, from a real
+`claude --bg -n probe-bg --model sonnet 'reply with the single word ok'` in an empty
+directory, watched by polling `$CLAUDE_CONFIG_DIR/sessions` while it started. One
+`{"t", "kind": "registered", "data"}` line, the same shape as the first line of
+`peer-frames.jsonl`.
+
+What it pins: a session nobody is sitting in front of registers as an ordinary peer.
+`peerProtocol` is 1 and `messagingSocketPath` has the usual `<pid>.sock` shape, so the
+record passes `registry.pins_ok` and the socket takes the same frames as any session's.
+`kind` is `"bg"` (an interactive session's is `"interactive"`), `entrypoint` is `"cli"`,
+`nameSource` is `"peer"`, and there is a `jobId` — the short id that `claude agents`
+lists and `claude stop` and `claude attach` take, which is the first eight characters of
+the session id. `peerFeatures` is three entries on 2.1.278
+(`notify_idle`, `reply_across_default_dirs`, `artifact_yield`) where the older
+`peer-frames.jsonl` record has one, so nothing may require a particular set.
+
+Two other forms were watched in the same run and are not committed, because what they
+show is a negative:
+
+- `claude -p` (print) registers too, with `kind: "interactive"` and
+  `entrypoint: "sdk-cli"`, but its record is removed the moment its single turn ends, so
+  it cannot be a peer anything follows up with. Its first record also carries a name
+  derived from the directory (`cwd-45`), replaced ~160 ms later by the `-n` name; that is
+  why the bridge waits for a record whose `nameSource` is not `derived`.
+- an interactive session is `kind: "interactive"`, `entrypoint: "cli"`.
+
+The same run showed a session's `status` going `busy` then `idle` across its turn, with `statusUpdatedAt` moving with it; only the settled `idle` is in the committed line, and nothing in the package reads either value.
+
 ### `sub-agent.jsonl`
 
 Two parts. First, a thread with multi-agent enabled asked to spawn one sub-agent with `spawn_agent`, wait for it and list its agents, seen from the connection subscribed to the root thread: the sub-agent's own `thread/status/changed`, `turn/started` and `turn/completed` arrive on that subscription, the root emits `subAgentActivity` items (`kind` `started`/`interacted`/`completed`, `agentThreadId`, `agentPath: "/root/helper"`) and `collabAgentToolCall` items, and the final answer carries `list_agents`' output (`{"agents":[{"agent_name":"/root","agent_status":"running"},{"agent_name":"/root/helper","agent_status":{"completed":"..."}}]}`). Second, appended later once both threads had been unloaded:

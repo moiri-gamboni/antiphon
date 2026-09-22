@@ -65,8 +65,29 @@ class ThreadState:
 
 
 @dataclass
+class SessionState:
+    """A Claude Code session antiphon started for a caller.
+
+    The session writes its own registry record, so nothing here duplicates it: this is
+    the ownership, the process to end on `stop`, and the escalations it is waiting on.
+    """
+
+    session_id: str
+    name: str
+    cwd: str
+    spawner: str  # a Codex thread id or "human"
+    job_id: str | None = None  # what `claude stop` and `claude attach` take
+    pending: list[dict] = field(default_factory=list)
+
+
+# What the bridge holds ownership and escalations for, whichever kind of session it is.
+Peer = ThreadState | SessionState
+
+
+@dataclass
 class State:
     threads: dict[str, ThreadState] = field(default_factory=dict)
+    sessions: dict[str, SessionState] = field(default_factory=dict)
     stopped: dict[str, str] = field(default_factory=dict)  # former name -> thread id, so `send` can name the resume command
     degraded: list[str] = field(default_factory=list)
 
@@ -80,13 +101,15 @@ class State:
         for thread_id, raw in data["threads"].items():
             sub_agents = {k: SubAgent(**v) for k, v in raw.pop("sub_agents").items()}
             threads[thread_id] = ThreadState(**raw, sub_agents=sub_agents)
-        return cls(threads=threads, stopped=data["stopped"], degraded=data["degraded"])
+        sessions = {k: SessionState(**v) for k, v in data.get("sessions", {}).items()}
+        return cls(threads=threads, sessions=sessions, stopped=data["stopped"], degraded=data["degraded"])
 
     def save(self, path: Path | str) -> None:
         path = Path(path)
         data = {
             "v": STATE_VERSION,
             "threads": {k: dataclasses.asdict(t) for k, t in self.threads.items()},
+            "sessions": {k: dataclasses.asdict(s) for k, s in self.sessions.items()},
             "stopped": self.stopped,
             "degraded": self.degraded,
         }

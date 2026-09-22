@@ -303,7 +303,7 @@ def test_the_shim_logs_the_raw_input_and_output_of_both_sides(tmp_path):
 
 def hook_ask_args(**overrides) -> dict:
     args = {
-        "thread_id": THREAD_ID, "turn_id": CAPTURED_INPUT["turn_id"], "tool_name": "Bash",
+        "asker": THREAD_ID, "turn_id": CAPTURED_INPUT["turn_id"], "tool_name": "Bash",
         "command": CAPTURED_INPUT["tool_input"]["command"], "cwd": CAPTURED_INPUT["cwd"],
         "reason": "touches the home directory", "hook": "guard.sh", "timeout": 5.0,
     }
@@ -339,7 +339,7 @@ def test_a_hook_ask_records_a_pending_hook_and_messages_the_spawner_once(short_t
     token = record["token"]
     assert record["kind"] == "hook" and record["hook"] == "guard.sh"
     assert texts == [
-        f'The Claude hook guard.sh asks before an action runs in "helper" (token {token}): touches the home directory\n'
+        f'Permission needed: the Claude hook guard.sh in "helper" asks before an action runs (token {token}): touches the home directory\n'
         f"  command: {CAPTURED_INPUT['tool_input']['command']}\n"
         f"  cwd: {CAPTURED_INPUT['cwd']}\n"
         f"The tool call is blocked until you answer. Reply with: antiphon approve {token}   or   antiphon deny {token} -- <why>"
@@ -389,7 +389,7 @@ def test_a_human_owned_thread_waits_for_a_shell_answer_and_the_deny_names_the_to
             rig.bridge.state.threads["t-human"] = ThreadState(
                 thread_id="t-human", name="tui", cwd="/work", origin="adopted", spawner="human", read_only=False,
             )
-            asking = asyncio.create_task(rig.bridge.dispatch("hook_ask", hook_ask_args(thread_id="t-human", timeout=0.5), rig.caller))
+            asking = asyncio.create_task(rig.bridge.dispatch("hook_ask", hook_ask_args(asker="t-human", timeout=0.5), rig.caller))
             await until(lambda: rig.bridge.state.threads["t-human"].pending)
             token = rig.bridge.state.threads["t-human"].pending[0]["token"]
             rows = await rig.bridge.dispatch("ls", {}, rig.caller)
@@ -407,7 +407,7 @@ def test_a_hook_ask_for_a_thread_antiphon_does_not_host_is_refused(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
             with pytest.raises(IpcError) as refused:
-                await rig.bridge.dispatch("hook_ask", hook_ask_args(thread_id="01a0c390-0000-7000-8000-000000000009"), rig.caller)
+                await rig.bridge.dispatch("hook_ask", hook_ask_args(asker="01a0c390-0000-7000-8000-000000000009"), rig.caller)
             return refused.value
 
     error = run(body())
@@ -433,7 +433,7 @@ def test_the_spawner_is_reminded_once_after_ten_minutes(short_tmp):
             return message_texts(frames), more == frames, token
 
     texts, nothing_more, token = run(body())
-    assert texts[1].startswith(f'Still waiting: the Claude hook guard.sh in "helper" (token {token}) has blocked an action for 10m')
+    assert texts[1].startswith(f'Still waiting: the Claude hook guard.sh in "helper" has blocked an action for 10m (token {token})')
     assert nothing_more
 
 

@@ -16,12 +16,15 @@ import time
 from pathlib import Path
 
 from antiphon import ipc
+from antiphon.claude import launch
 from antiphon.codex import hooks
 from antiphon.ipc import BridgeUnreachable, IpcError
 from antiphon.rawlog import RawLog
 from antiphon.state import ensure_home
 
 START_TIMEOUT = 3.0
+# `start --claude` waits for the session to register itself, which the bridge gives 10 s.
+REGISTER_WAIT = 30.0
 WAIT_RETRY_BACKOFF = 3.0
 WAIT_DEFAULT_TIMEOUT = 600.0
 LOG_TAIL_LINES = 20
@@ -144,6 +147,8 @@ def verb_start(args, client: Client) -> int:
     if misplaced is not None:
         print(f'antiphon: {misplaced} goes before the --: antiphon start {misplaced} -- "<brief>"', file=sys.stderr)
         return 2
+    if args.claude:
+        return _start_claude(args, client)
     result = client.call("start", {
         "cwd": os.path.abspath(args.cwd), "name": args.name, "read_only": args.read_only, "model": args.model,
         "effort": args.effort, "report": not args.no_report, "worktree": args.worktree,
@@ -157,6 +162,28 @@ def verb_start(args, client: Client) -> int:
     if not args.prompt:
         return 0
     return _send(client, result["thread_id"], " ".join(args.prompt), args.wait, args.timeout)
+
+
+def _start_claude(args, client: Client) -> int:
+    """`start --claude`: a Claude Code session of the caller's own, in the background."""
+    unsupported = [name for flag, name in (
+        (args.read_only, "--read-only"), (args.effort, "--effort"), (args.worktree, "--worktree"),
+        (args.review_by_parent, "--review-by-parent"), (args.wait, "--wait"), (args.no_report, "--no-report"),
+    ) if flag]
+    if unsupported:
+        print(f"antiphon: {', '.join(unsupported)} apply to Codex threads, not to --claude sessions", file=sys.stderr)
+        return 2
+    result = client.call("start_claude", {
+        "cwd": os.path.abspath(args.cwd), "name": args.name, "model": args.model,
+        "gate": args.gate, "prompt": " ".join(args.prompt) or None,
+    }, timeout=REGISTER_WAIT)
+    print(f"started the Claude Code session {result['name']} ({result['session_id']}) in {result['cwd']}")
+    if result["hook"] is None:
+        print("antiphon: hooks/claude-permission-forward.sh was not found, so this session decides its own "
+              "permissions instead of asking you", file=sys.stderr)
+    if args.visible:
+        return _attach_session(client, result["name"], result["job_id"], result["cwd"])
+    return 0
 
 
 def verb_send(args, client: Client) -> int:
@@ -187,9 +214,11 @@ def verb_wait(args, client: Client) -> int:
 
 
 def _wait(client: Client, target: str, timeout: float | None) -> int:
-    """Wait for the thread's turn to end; the bridge going away once is survived."""
+    """Wait for the peer's turn to end; the bridge going away once is survived."""
     timeout = timeout or WAIT_DEFAULT_TIMEOUT
-    thread_id = client.call("status", {"target": target})["thread_id"]
+    info = client.call("status", {"target": target})
+    # A name can be re-taken while the wait runs; the id the peer keeps cannot.
+    thread_id = info["thread_id"] if info["kind"] == "codex" else info["session_id"]
     for attempt in (1, 2):
         try:
             result = client.call("wait", {"target": thread_id, "timeout": timeout}, timeout=timeout + 5)
@@ -262,12 +291,24 @@ def verb_name(args, client: Client) -> int:
 
 def verb_attach(args, client: Client) -> int:
     info = client.call("status", {"target": args.target})
+    if info["kind"] == "claude":
+        return _attach_session(client, info["name"], info["job_id"], info["cwd"])
     return _attach(client, info["thread_id"], info["name"], info["cwd"])
 
 
 def _attach(client: Client, thread_id: str, name: str, cwd: str) -> int:
-    """Open the thread in a tmux window when there is one to open it in; else print the command."""
-    command = f"codex resume {shlex.quote(thread_id)}"
+    return _open_terminal(client, name, cwd, f"codex resume {shlex.quote(thread_id)}")
+
+
+def _attach_session(client: Client, name: str, job_id: str | None, cwd: str) -> int:
+    if job_id is None:
+        print(f"antiphon: {name} has no background job recorded; find it with `claude agents`", file=sys.stderr)
+        return 2
+    return _open_terminal(client, name, cwd, shlex.join(launch.attach_argv(job_id)))
+
+
+def _open_terminal(client: Client, name: str, cwd: str, command: str) -> int:
+    """Run `command` in a tmux window when there is a tmux to open one in; else print it."""
     if "TMUX" not in os.environ:
         print(command)
         return 0
@@ -314,7 +355,7 @@ def verb_hook_run(args, home: Path) -> int:
     def ask(codex_in: dict, reason: str, budget: float) -> tuple[str, str | None]:
         client = connect(home)
         result = client.call("hook_ask", {
-            "thread_id": codex_in.get("session_id") or os.environ.get("CODEX_THREAD_ID"), "turn_id": codex_in.get("turn_id"),
+            "asker": codex_in.get("session_id") or os.environ.get("CODEX_THREAD_ID"), "turn_id": codex_in.get("turn_id"),
             "tool_name": codex_in["tool_name"], "command": hooks.summarize_tool_input(codex_in["tool_input"]),
             "cwd": codex_in["cwd"], "reason": reason, "hook": os.path.basename(args.script), "timeout": budget,
         }, timeout=budget + 2)
@@ -428,6 +469,11 @@ def build_parser() -> argparse.ArgumentParser:
     start = sub.add_parser("start", help="start a Codex thread (idle until sent to, unless a prompt follows --)")
     start.add_argument("-C", dest="cwd", default=os.getcwd(), help="working directory (default: the current one)")
     start.add_argument("-n", "--name")
+    start.add_argument("--claude", action="store_true",
+                       help="start a Claude Code session instead of a Codex thread; it runs in the background, "
+                            "takes send/wait/stop/attach like a thread, and has no interrupt")
+    start.add_argument("--gate", help="with --claude: the tool names whose calls the session asks you about "
+                                      "(default: every tool)")
     start.add_argument("--read-only", action="store_true")
     start.add_argument("-m", "--model")
     start.add_argument("--effort")
@@ -445,19 +491,19 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--timeout", type=float)
     send.add_argument("text", nargs="+", help="the message; put options (--wait, --timeout) before the --")
 
-    wait = sub.add_parser("wait", help="wait for the thread's turn to end and print the outcome")
+    wait = sub.add_parser("wait", help="wait for the thread's turn, or a Claude Code session's next idle, and print the outcome")
     wait.add_argument("target")
     wait.add_argument("--timeout", type=float)
 
-    sub.add_parser("interrupt", help="end the thread's current turn").add_argument("target")
+    sub.add_parser("interrupt", help="end the thread's current turn (Claude Code sessions have no such surface)").add_argument("target")
     sub.add_parser("status", help="a thread's state, or the bridge's").add_argument("target", nargs="?")
     sub.add_parser("ls", help="every peer on this machine")
-    sub.add_parser("stop", help="retire the thread as a peer (its transcript stays)").add_argument("target")
+    sub.add_parser("stop", help="retire the thread as a peer, or end a Claude Code session started here (transcripts stay)").add_argument("target")
     sub.add_parser("resume", help="host a stopped or never-hosted thread again").add_argument("target")
     name = sub.add_parser("name", help="rename a thread (from inside a Codex thread, the thread itself when no target is given)")
     name.add_argument("target", nargs="?")
     name.add_argument("new")
-    attach = sub.add_parser("attach", help="open the thread in a new tmux window, or print the command that resumes it")
+    attach = sub.add_parser("attach", help="open the thread or session in a new tmux window, or print the command that opens it")
     attach.add_argument("target")
     notify = sub.add_parser("notify", help="from inside a Codex thread: be messaged when a peer's turn ends")
     notify.add_argument("target")
