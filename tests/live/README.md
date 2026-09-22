@@ -22,7 +22,6 @@ Prepare a scratch repository (`mkdir ~/antiphon-scratch && git -C ~/antiphon-scr
 | 12 | `codex app-server daemon restart` during a turn | the bridge stays up, reconnects, and records that turn as interrupted |
 | 13 | a Codex terminal someone else started | it is adopted and listed within one reconcile pass |
 | 14 | `antiphon stop` each thread | the peers disappear from the listing and leave no registry record or socket behind |
-
 | 15 | from a Codex thread: `antiphon start --claude -n <name> -m <model> -C <dir>` | a background Claude session registers under that name within ten seconds, with the Codex thread as its spawner |
 | 16 | `antiphon send <session>` from that thread, asking for a reply | the message arrives in the session and its reply reaches the Codex thread as a turn, with nothing held |
 | 17 | the same session runs a gated tool | the call is held, the request reaches the Codex thread with a token, and `antiphon approve <token>` lets it through |
