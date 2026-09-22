@@ -417,7 +417,10 @@ def test_attach_inside_tmux_opens_a_window_on_the_thread_and_prints_the_pane(rig
     monkeypatch.setattr(subprocess, "run", tmux_run(calls))
     code, out, err = rig.run("attach", "helper", capsys=capsys)
     assert (code, out, err) == (0, "main:@3.%7\n", "")
-    assert calls == [["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_id}.#{pane_id}", "-n", "helper", f"codex resume {THREAD_ID}"]]
+    # The window opens in the thread's own directory: a window inheriting the caller's
+    # directory makes Codex ask which one to resume in, and ask to trust the wrong one.
+    assert calls == [["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_id}.#{pane_id}",
+                      "-c", str(rig.tmp), "-n", "helper", f"codex resume {THREAD_ID}"]]
     logged = raw_tmux_lines(rig)
     assert [(line["dir"], line["boundary"]) for line in logged] == [("out", "tmux"), ("in", "tmux")]
     assert logged[0]["data"] == calls[0]

@@ -151,7 +151,7 @@ def verb_start(args, client: Client) -> int:
     })
     print(f"started {result['name']} ({result['thread_id']}) in {result['cwd']}")
     if args.visible:
-        attached = _attach(client, result["thread_id"], result["name"])
+        attached = _attach(client, result["thread_id"], result["name"], result["cwd"])
         if attached != 0:
             return attached
     if not args.prompt:
@@ -262,16 +262,19 @@ def verb_name(args, client: Client) -> int:
 
 def verb_attach(args, client: Client) -> int:
     info = client.call("status", {"target": args.target})
-    return _attach(client, info["thread_id"], info["name"])
+    return _attach(client, info["thread_id"], info["name"], info["cwd"])
 
 
-def _attach(client: Client, thread_id: str, name: str) -> int:
+def _attach(client: Client, thread_id: str, name: str, cwd: str) -> int:
     """Open the thread in a tmux window when there is one to open it in; else print the command."""
     command = f"codex resume {shlex.quote(thread_id)}"
     if "TMUX" not in os.environ:
         print(command)
         return 0
-    argv = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_id}.#{pane_id}", "-n", name, command]
+    # The window starts in the thread's own directory. One inheriting the caller's makes
+    # Codex ask which directory to resume in, and ask to trust a directory nobody meant.
+    argv = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_id}.#{pane_id}",
+            "-c", cwd, "-n", name, command]
     rawlog = RawLog(client.home / "log" / "raw.jsonl")
     rawlog.log("out", "tmux", argv)
     done = subprocess.run(argv, capture_output=True, text=True, check=False)
