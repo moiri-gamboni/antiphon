@@ -140,6 +140,12 @@ Verdict: the subscribed client's connection receives `item/commandExecution/requ
 
 Not captured: what the TUI's own answer does to a request a silent second subscriber is holding. Phase A ends with the prompt still open — no answer to request id 0 and no `serverRequest/resolved` for it — and phase B's pane was captured about eight seconds before its escalation, showing "Working (4s)" rather than a prompt, while the client answered that request 2 ms after it arrived. The one `serverRequest/resolved` in the file is for the request the *client* answered, with `{"decision": "decline"}` — a second instance of the `decline.jsonl` verdict.
 
+### `turn-on-a-busy-thread.jsonl`
+
+A long turn (`sleep 45`) started, then a second `turn/start` sent on the same thread twelve seconds in, carrying an instruction the first turn had no reason to follow ("end your reply with the word BANANA"), from `slice0/turn-active-text.sh`.
+
+What it pins: the daemon **does not refuse a `turn/start` while a turn is running**, and does not start a second turn. It answers with the turn already in progress (the same `turn.id` the first call returned) and puts the text into it: the transcript shows the second `userMessage` item mid-turn and the final answer is "SLEPT BANANA". So a second start behaves as a steer, and the race where a turn begins between reading a thread's status and acting on it costs a message nothing. An earlier run of the same shape (`slice0/turn-active.jsonl`) confirms the no-error half separately, by interrupting instead of waiting. There is accordingly no "turn already active" error: the delivery ladder's rung for one was removed, having been built on an invented message.
+
 ### `two-subscribers.jsonl`
 
 `approvalsReviewer: "user"`: two connections on one thread, each frame tagged `A/` or `B/` by the connection that saw it (`{"from": "A"|"B", "sent"|"recv": ...}`), from `slice0/antiphon-two-subs.py`. A starts the thread (subscribing itself), runs a benign turn so a rollout exists, then B resumes it (subscribing itself); A then raises a write outside the workspace and answers its own `item/commandExecution/requestApproval` with `accept`, while B only watches.

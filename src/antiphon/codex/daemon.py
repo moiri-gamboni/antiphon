@@ -317,7 +317,9 @@ async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | N
 
     The daemon unloads idle threads and turns end between a status read and the
     call that acts on it, so each of those races is handled once; anything else
-    raises the daemon's error.
+    raises the daemon's error. The opposite race needs no handling: a turn/start
+    sent while a turn is running is put into that turn and answered with it, so
+    the text arrives either way (turn-on-a-busy-thread.jsonl).
     """
     client_id = uuid.uuid4().hex
     try:
@@ -347,13 +349,6 @@ async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | N
             d.note("codex.deliver", {"rung": "not-loaded", "threadId": thread_id, "error": e.error})
             await d.thread_resume(thread_id)
             result = await d.turn_start(thread_id, text, sandbox_policy, client_id, effort)
-        elif _is_turn_active(e):
-            d.note("codex.deliver", {"rung": "turn-active", "threadId": thread_id, "error": e.error})
-            turn_id = await d.active_turn(thread_id)
-            if turn_id is None:
-                raise
-            result = await d.turn_steer(thread_id, turn_id, text, client_id)
-            return Delivery("steered", result["turnId"], client_id)
         else:
             raise
     return Delivery("started", result["turn"]["id"], client_id)
@@ -374,10 +369,3 @@ def _has_no_rollout(e: DaemonError) -> bool:
     # thread/turns/list, and "no rollout found for thread id <id>" from thread/resume.
     message = e.error.get("message", "")
     return "missing source rollout" in message or "no rollout found" in message
-
-
-def _is_turn_active(e: DaemonError) -> bool:
-    # Provisional: no capture of turn/start against a thread whose turn is already
-    # running exists yet, so this matches on the words rather than an exact text.
-    message = e.error.get("message", "").lower()
-    return "turn" in message and "active" in message

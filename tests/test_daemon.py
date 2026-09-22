@@ -16,6 +16,7 @@ SUB_AGENT = load_fixture("sub-agent.jsonl")
 ADOPTION = load_fixture("adoption.jsonl")
 TURNS_LIST = load_fixture("turns-list.jsonl")
 FRESH_THREAD = load_fixture("fresh-thread.jsonl")
+BUSY_THREAD = load_fixture("turn-on-a-busy-thread.jsonl")
 GUARDIAN = load_fixture("guardian-override.jsonl")
 
 THREAD_ID = THREAD_START.result(2)["thread"]["id"]
@@ -615,17 +616,18 @@ def test_deliver_gives_up_when_the_resume_itself_fails(tmp_path):
     assert info.value.method == "thread/resume"
 
 
-def test_deliver_reads_again_and_steers_when_a_turn_started_in_between(tmp_path):
-    # Provisional: no capture holds the error turn/start returns while a turn is
-    # already active; the message is a guess and only its classification is tested.
+def test_deliver_loses_nothing_when_a_turn_starts_between_the_read_and_the_start(tmp_path):
+    # The daemon does not refuse a turn/start while one is running: it puts the text
+    # into the running turn and answers with that turn, so this race costs a message
+    # nothing and needs no rung of its own (turn-on-a-busy-thread.jsonl).
+    running = BUSY_THREAD.result(4)
     delivery, methods, rungs, _ = deliver_with(tmp_path, {
-        "thread/turns/list": [turns_list(COMPLETED_TURN), turns_list(TURN_STARTED["turn"])],
-        "turn/start": {"error": {"code": -32600, "message": "turn already active"}},
-        "turn/steer": {"result": STEERED},
+        "thread/turns/list": turns_list(COMPLETED_TURN),
+        "turn/start": {"result": running},
     })
-    assert delivery == Delivery("steered", TURN_ID, delivery.client_id)
-    assert methods == ["thread/turns/list", "turn/start", "thread/turns/list", "turn/steer"]
-    assert [r["rung"] for r in rungs] == ["turn-active"]
+    assert delivery == Delivery("started", running["turn"]["id"], delivery.client_id)
+    assert methods == ["thread/turns/list", "turn/start"]
+    assert rungs == []
 
 
 def test_deliver_raises_when_the_turn_start_fails_for_another_reason(tmp_path):
