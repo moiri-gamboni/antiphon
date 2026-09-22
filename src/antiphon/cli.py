@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from antiphon import ipc
+from antiphon.codex import hooks
 from antiphon.ipc import BridgeUnreachable, IpcError
 from antiphon.rawlog import RawLog
 from antiphon.state import ensure_home
@@ -300,7 +301,104 @@ def verb_deny(args, client: Client) -> int:
     return 0
 
 
+# --- Claude Code hooks as Codex hooks ------------------------------------------------
+
+
+def verb_hook_run(args, home: Path) -> int:
+    """The shim Codex runs: Codex hook input on stdin, Codex hook output on stdout. The
+    bridge is contacted only for an `ask`, so allow and deny work with no bridge at all."""
+
+    def ask(codex_in: dict, reason: str, budget: float) -> tuple[str, str | None]:
+        client = connect(home)
+        result = client.call("hook_ask", {
+            "thread_id": codex_in.get("session_id") or os.environ.get("CODEX_THREAD_ID"), "turn_id": codex_in.get("turn_id"),
+            "tool_name": codex_in["tool_name"], "command": hooks.summarize_tool_input(codex_in["tool_input"]),
+            "cwd": codex_in["cwd"], "reason": reason, "hook": os.path.basename(args.script), "timeout": budget,
+        }, timeout=budget + 2)
+        return result["decision"], result["why"]
+
+    try:
+        out = hooks.run_shim(args.script, sys.stdin.read(), home=home, ask=ask, event=args.event, timeout=args.timeout)
+    except hooks.HookInputError as e:
+        # Without a readable event no JSON answer parses; exit 2 with stderr is the one
+        # denial every Codex hook event understands.
+        print(f"antiphon: {e}", file=sys.stderr)
+        return 2
+    if out:
+        print(out)
+    return 0
+
+
+class ListedHooks:
+    """The daemon's view of the hooks it loads from `path`: `hooks/list` once, keyed by command."""
+
+    def __init__(self, client: Client, path: Path):
+        entries = client.call("hook_list", {"cwd": os.getcwd()})
+        self.warnings = [w for entry in entries for w in entry.get("warnings", [])]
+        self.by_command = {h["command"]: h for entry in entries for h in entry["hooks"] if h["sourcePath"] == str(path)}
+
+    def trust_status(self, command: str) -> str:
+        listed = self.by_command.get(command)
+        return listed["trustStatus"] if listed else "not listed by Codex"
+
+
+def verb_hook_install(args, client: Client) -> int:
+    script = os.path.abspath(args.script)
+    path = hooks.hooks_file()
+    data = hooks.load_hooks(path)
+    hooks.remove_script(data, script)
+    handler = hooks.add_script(data, script, args.event, args.matcher, args.timeout)
+    hooks.save_hooks(path, data)
+    catalog = ListedHooks(client, path)
+    listed = catalog.by_command.get(handler["command"])
+    if listed is None:
+        for warning in catalog.warnings:
+            print(f"antiphon: codex: {warning}", file=sys.stderr)
+        print(f"antiphon: wrote {path}, but Codex does not list the hook; check `[features]` in your Codex config, then rerun", file=sys.stderr)
+        return 2
+    if listed["trustStatus"] != "trusted":
+        client.call("hook_trust", {"key": listed["key"], "hash": listed["currentHash"]})
+    status = ListedHooks(client, path).trust_status(handler["command"])
+    print(f"installed {script} as a Codex {args.event} hook in {path} (key {listed['key']}): {status}")
+    if args.timeout < hooks.IPC_MARGIN + 1:
+        print(f"antiphon: a {args.timeout} s timeout leaves no time to forward an ask; an ask from this hook is denied", file=sys.stderr)
+    return 0 if status == "trusted" else 2
+
+
+def verb_hook_uninstall(args, client: Client) -> int:
+    script = os.path.abspath(args.script)
+    path = hooks.hooks_file()
+    data = hooks.load_hooks(path)
+    if not hooks.remove_script(data, script):
+        print(f"antiphon: {script} is not installed in {path}", file=sys.stderr)
+        return 2
+    hooks.save_hooks(path, data)
+    print(f"removed {script} from {path}; its trusted hash stays in the Codex config and matches nothing else")
+    return 0
+
+
+def verb_hook_list(args, client: Client) -> int:
+    path = hooks.hooks_file()
+    ours = hooks.installed(hooks.load_hooks(path))
+    if not ours:
+        print(f"no Claude hooks installed in {path}")
+        return 0
+    listed = ListedHooks(client, path)
+    table = [["EVENT", "MATCHER", "TIMEOUT", "TRUST", "SCRIPT"]]
+    for entry in ours:
+        table.append([entry["event"], entry["matcher"] or "*", str(entry["timeout"]), listed.trust_status(entry["command"]), entry["script"]])
+    widths = [max(len(row[i]) for row in table) for i in range(4)]
+    for row in table:
+        print(" ".join(cell.ljust(width) for cell, width in zip(row, widths)) + " " + row[4])
+    return 0
+
+
+def verb_hook(args, client: Client) -> int:
+    return {"install": verb_hook_install, "uninstall": verb_hook_uninstall, "list": verb_hook_list}[args.hook_verb](args, client)
+
+
 VERBS = {
+    "hook": verb_hook,
     "ping": verb_ping,
     "start": verb_start,
     "send": verb_send,
@@ -364,6 +462,21 @@ def build_parser() -> argparse.ArgumentParser:
     deny = sub.add_parser("deny", help="deny an escalation by its token, telling the thread why")
     deny.add_argument("token")
     deny.add_argument("why", nargs="+")
+
+    hook = sub.add_parser("hook", help="run Claude Code hook scripts as Codex hooks")
+    hook_sub = hook.add_subparsers(dest="hook_verb", required=True)
+    events = list(hooks.CLAUDE_EVENT)
+    run = hook_sub.add_parser("run", help="the shim Codex runs: Codex hook input on stdin, Codex hook output on stdout")
+    run.add_argument("script", help="the Claude Code hook script")
+    run.add_argument("--event", choices=events, help="override the event named in the input")
+    run.add_argument("--timeout", type=float, default=hooks.DEFAULT_TIMEOUT, help="the hook's timeout in hooks.json (the budget for an ask)")
+    install = hook_sub.add_parser("install", help="register a Claude Code hook script in ~/.codex/hooks.json and trust it")
+    install.add_argument("script")
+    install.add_argument("--event", choices=events, default="PreToolUse")
+    install.add_argument("--matcher", help="tool name(s) the hook applies to, e.g. Bash; default: every tool")
+    install.add_argument("--timeout", type=int, default=hooks.DEFAULT_TIMEOUT, help="seconds Codex gives the hook (default: Codex's own 600)")
+    hook_sub.add_parser("uninstall", help="remove the script's entry from hooks.json").add_argument("script")
+    hook_sub.add_parser("list", help="the installed scripts and whether Codex trusts them")
     return parser
 
 
@@ -375,6 +488,8 @@ def main(argv: list[str] | None = None) -> int:
         bridge.main()
         return 0
     home = ensure_home()
+    if args.verb == "hook" and args.hook_verb == "run":
+        return verb_hook_run(args, home)
     try:
         client = connect(home)
         return VERBS[args.verb](args, client)

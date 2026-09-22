@@ -14,10 +14,16 @@ the same way, answered with a decision on `approve`/`deny`, and the spawner
 is reminded once when one has waited ten minutes. Waiting never cancels a
 request: `deny` is the way out. A request is retired only once it can no longer
 be answered: its connection to the daemon dropped, or its asking turn ended.
+
+A Claude Code hook run through `antiphon hook run` that answers `ask` is the
+third kind: the shim's `hook_ask` op records it, sends the same message, and
+blocks the tool call until `approve`/`deny` resolves it or the hook's own
+timeout runs out, at which point the answer is deny and the record is dropped.
 """
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
 import json
@@ -55,15 +61,16 @@ class Pending:
     review_completed_params: dict | None
     since: float
     resolved: bool
-    kind: str  # "denied": the reviewer's denial, nothing blocks; "request": a blocking server request
+    kind: str  # "denied": the reviewer's denial, nothing blocks; "request": a blocking server request; "hook": a blocked hook
     request_id: int | str | None
     epoch: int | None
     available_decisions: list | None
     reminded: bool = False
+    hook: str | None = None  # the Claude hook script that asked, for kind "hook"
 
     @property
     def label(self) -> str:
-        return "denied" if self.kind == "denied" else "approval"
+        return {"denied": "denied", "hook": "hook"}.get(self.kind, "approval")
 
 
 def token_for(key: str) -> str:
@@ -133,6 +140,7 @@ class Approvals:
     def __init__(self, bridge: Bridge):
         self.bridge = bridge
         self.clock = time.time
+        self._hook_waiters: dict[str, asyncio.Future] = {}  # token -> the blocked hook_ask op
 
     # --- the records ------------------------------------------------------------------
 
@@ -166,8 +174,12 @@ class Approvals:
         record.resolved = True
         self._update(thread, record)
 
+    def _drop(self, thread: ThreadState, record: Pending) -> None:
+        self._store(thread, [p for p in self.pending(thread) if p.token != record.token])
+
     def labels(self, thread: ThreadState) -> list[str]:
-        """`denied <token> <age>` / `approval <token> <age>` for each unanswered escalation."""
+        """`denied <token> <age>` / `approval <token> <age>` / `hook <token> <age>` for each
+        unanswered escalation."""
         now = self.clock()
         return [f"{p.label} {p.token} {age(now - p.since)}" for p in self.pending(thread) if not p.resolved]
 
@@ -233,22 +245,68 @@ class Approvals:
                 log.info("approval request %s on %s was answered elsewhere", record.token, thread.name)
                 self._resolve(thread, record)
 
+    # --- a Claude hook that answered ask: blocked until the spawner answers ----------------
+
+    async def op_hook_ask(self, args: dict, caller: Caller) -> dict:
+        """Block the shim's tool call on the spawner's answer; `{"decision", "why", "token"}`.
+        The hook's timeout is the shim's budget: unanswered by then, the answer is deny."""
+        thread = self.bridge.state.threads.get(args["thread_id"])
+        if thread is None:
+            raise IpcError("unknown_target", f"{args['thread_id']} is not a thread antiphon hosts")
+        record = Pending(
+            token=token_for(f"hook:{thread.thread_id}:{time.time_ns()}"), thread_id=thread.thread_id, turn_id=args.get("turn_id"),
+            command=args["command"], cwd=args["cwd"], rationale=args["reason"], risk_level=None, review_completed_params=None,
+            since=self.clock(), resolved=False, kind="hook", request_id=None, epoch=None, available_decisions=None,
+            hook=args["hook"],
+        )
+        self._add(thread, record)
+        waiter = asyncio.get_running_loop().create_future()
+        self._hook_waiters[record.token] = waiter
+        log.warning("the Claude hook %s asks before %r in %s (token %s)", record.hook, record.command, thread.name, record.token)
+        if thread.spawner == "human":
+            log.warning("%s has no spawner to ask; answer from a shell: antiphon approve %s", thread.name, record.token)
+        head = f'The Claude hook {record.hook} asks before an action runs in "{thread.name}" (token {record.token}): {record.rationale}'
+        self._notify(thread, record, head, "The tool call is blocked until you answer.")
+        try:
+            decision, why = await asyncio.wait_for(waiter, args["timeout"])
+        except TimeoutError:
+            self._drop(thread, record)
+            why = f"nobody answered `antiphon approve {record.token}` within {args['timeout']} s"
+            log.warning("hook %s on %s: %s", record.token, thread.name, why)
+            decision = "deny"
+        finally:
+            self._hook_waiters.pop(record.token, None)
+        return {"decision": decision, "why": why, "token": record.token}
+
+    def _settle_hook(self, thread: ThreadState, record: Pending, decision: str, why: str | None) -> None:
+        waiter = self._hook_waiters.get(record.token)
+        if waiter is None or waiter.done():
+            self._drop(thread, record)
+            raise IpcError("precondition", f"the hook that asked for {record.token} is no longer waiting")
+        waiter.set_result((decision, why))
+        self._resolve(thread, record)
+
     async def sweep(self) -> None:
         """After each reconcile pass: retire requests whose connection is gone, and remind
-        the spawner once of a request that has waited long enough."""
+        the spawner once of a request or a blocked hook that has waited long enough."""
         d = self.bridge.daemon
         now = self.clock()
         for thread in list(self.bridge.state.threads.values()):
             for record in self.pending(thread):
-                if record.kind != "request" or record.resolved:
+                if record.kind == "denied" or record.resolved:
                     continue
-                if d is not None and record.epoch != d.epoch:
+                if record.kind == "request" and d is not None and record.epoch != d.epoch:
                     await self._lost(thread, record, d)
                 elif not record.reminded and now - record.since >= REMIND_AFTER:
                     record.reminded = True
                     self._update(thread, record)
-                    head = f'Still waiting: the action in "{thread.name}" (token {record.token}) has been blocked for {age(now - record.since)}: {record.rationale}'
-                    self._notify(thread, record, head, "The turn stays blocked until you answer.")
+                    waited = age(now - record.since)
+                    if record.kind == "hook":
+                        head = f'Still waiting: the Claude hook {record.hook} in "{thread.name}" (token {record.token}) has blocked an action for {waited}: {record.rationale}'
+                        self._notify(thread, record, head, "The tool call stays blocked until you answer.")
+                    else:
+                        head = f'Still waiting: the action in "{thread.name}" (token {record.token}) has been blocked for {waited}: {record.rationale}'
+                        self._notify(thread, record, head, "The turn stays blocked until you answer.")
 
     def _notify(self, thread: ThreadState, record: Pending, head: str, tail: str) -> None:
         cwd = f"  cwd: {record.cwd}\n" if record.cwd else ""
@@ -263,9 +321,13 @@ class Approvals:
             return
         records = self.pending(thread)
         turn_id = params["turn"]["id"]
-        # Drop resolved records, and any blocking request whose asking turn just ended: a
-        # request cannot outlive its turn, so keeping it would show a false "blocked" label.
-        kept = [p for p in records if not p.resolved and not (p.kind == "request" and p.turn_id == turn_id)]
+        # Drop resolved records, and any blocking request or hook whose asking turn just
+        # ended: neither can outlive its turn, so keeping it would show a false "blocked" label.
+        kept = [p for p in records if not p.resolved and not (p.kind in ("request", "hook") and p.turn_id == turn_id)]
+        for record in records:
+            waiter = self._hook_waiters.get(record.token) if record.kind == "hook" and record.turn_id == turn_id else None
+            if waiter is not None and not waiter.done():
+                waiter.set_result(("deny", "the turn ended before the hook was answered"))
         if len(kept) != len(records):
             self._store(thread, kept)
 
@@ -273,6 +335,9 @@ class Approvals:
 
     async def op_approve(self, args: dict, caller: Caller) -> dict:
         thread, record = self._unresolved(args["token"])
+        if record.kind == "hook":
+            self._settle_hook(thread, record, "allow", None)
+            return self._reply(thread, record)
         if record.kind == "request":
             await self._answer(thread, record, {"decision": "accept"})
             return self._reply(thread, record)
@@ -295,6 +360,10 @@ class Approvals:
     async def op_deny(self, args: dict, caller: Caller) -> dict:
         thread, record = self._unresolved(args["token"])
         why = args["why"]
+        if record.kind == "hook":
+            # The hook's own deny output carries the reason to the thread; nothing to tell it.
+            self._settle_hook(thread, record, "deny", why)
+            return self._reply(thread, record)
         told = f"The action `{record.command}` stays denied: {why}"
         if record.kind == "request":
             # Whether the daemon accepts `decline` is not captured; the captured requests
@@ -366,12 +435,15 @@ def install(bridge: Bridge) -> Approvals:
     approvals = Approvals(bridge)
     for thread in bridge.state.threads.values():
         # A request lives on the connection it arrived on, which died with the previous
-        # bridge process; the sweep retires these once the daemon is back.
+        # bridge process; the sweep retires these once the daemon is back. A blocked hook
+        # lived in an op of that process: nobody waits on it any more, so it is forgotten.
+        thread.pending = [record for record in thread.pending if record["kind"] != "hook"]
         for record in thread.pending:
             if record["kind"] == "request":
                 record["epoch"] = None
     bridge.ops["approve"] = approvals.op_approve
     bridge.ops["deny"] = approvals.op_deny
+    bridge.ops["hook_ask"] = approvals.op_hook_ask
     bridge.on_server_request = approvals.on_server_request
     bridge.notifications["item/autoApprovalReview/completed"] = approvals.on_review_completed
     bridge.notifications["serverRequest/resolved"] = approvals.on_server_request_resolved

@@ -29,6 +29,7 @@ from antiphon.callers import Caller
 from antiphon.claude import registry
 from antiphon.codex import approvals as approvals_mod
 from antiphon.codex import daemon as daemon_mod
+from antiphon.codex import hooks as hooks_mod
 from antiphon.codex.daemon import Daemon, DaemonError, DaemonUnavailable, deliver
 from antiphon.codex.ws import TransportClosed
 from antiphon.ipc import IpcError
@@ -56,6 +57,8 @@ REQUIRED_ARGS = {
     "approve": ("token",),
     "deny": ("token", "why"),
     "notify": ("target",),
+    "hook_ask": ("thread_id", "tool_name", "command", "cwd", "reason", "hook", "timeout"),
+    "hook_trust": ("key", "hash"),
 }
 WAIT_DEFAULT_TIMEOUT = 600.0
 DAEMON_WAIT = 3.0
@@ -275,6 +278,7 @@ class Bridge:
             "exited": self.on_child_exited,
         }
         self.approvals = approvals_mod.install(self)
+        hooks_mod.install(self)
         peers.install(self)
 
     # --- lifecycle ---------------------------------------------------------------

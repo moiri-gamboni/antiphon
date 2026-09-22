@@ -121,6 +121,21 @@ What it pins: `thread/turns/list` answers from the rollout even for a thread the
 
 A thread with multi-agent enabled asked to list its tools verbatim; the `.txt` is the model's listing (`name: description`, one per line). The multi-agent tools are `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, `list_agents`, all scoped to the thread's own agent tree. No tool addresses another top-level thread, so a Codex-side `send` to another Codex thread is not a duplicate of a native tool.
 
+### `hooks-list.jsonl`, `codex-hook-schemas/`
+
+Two read-only `hooks/list` calls, no model turn: one for a directory with no hooks configured, one for a trusted project directory holding a temporary `.codex/hooks.json` with a single `PermissionRequest` command hook (removed after the capture):
+
+```
+capture_daemon.py hooks/list '{"cwds": ["~"]}'
+capture_daemon.py hooks/list '{"cwds": ["/tmp/codex-src"]}'
+```
+
+What it pins: the reply is `{"data": [{"cwd", "hooks": [...], "warnings": [], "errors": []}]}`, one entry per requested `cwd`; each hook is `{key, eventName ("permissionRequest"), handlerType ("command"), command, async, matcher, timeoutSec, statusMessage, additionalContextLimit, sourcePath, source ("project" here, "user" for `~/.codex/hooks.json`), pluginId, displayOrder, enabled, isManaged, currentHash ("sha256:<hex>"), trustStatus ("untrusted" | "trusted" | "modified" | "managed")}`. The `key` is `<absolute path of the hooks file>:<event in snake_case>:<matcher group index>:<handler index>`, the same string the user config's `[hooks.state."<key>"] trusted_hash` table is keyed by. `hooks/list` reloads the configuration for each call, so a hook written to `hooks.json` is listed by the next call without a daemon restart.
+
+`codex-hook-schemas/` holds the six generated JSON schemas for the `PermissionRequest`, `PreToolUse` and `PostToolUse` command-hook stdin and stdout, copied unchanged from the Codex source at the installed version (`codex-rs/hooks/schema/generated/`); the one real hook input on record is the `permission_hook_input` line of `permission-hook-order.jsonl`, whose `session_id` equals the `threadId` of the surrounding `hook/started` notification.
+
+Not captured: `config/batchWrite` (the daemon-side write of `hooks.state.<key>.trusted_hash` the Codex TUI uses to trust a hook; its request and reply shapes are taken from `codex-rs/app-server-protocol/src/protocol/v2/config.rs`), and a hook actually run by Codex through the shim.
+
 ## Not yet captured
 
 The Codex account used for these captures reached 100% of its 30-day usage window (`account/rateLimits/read`: `planType: "free"`, `usedPercent: 100`, reset on 2026-10-21) while the first new capture was running. Everything that needs the model to take a turn is therefore still open, with the exact procedure ready to run:

@@ -1,0 +1,12 @@
+{"sent": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "capture_daemon", "version": "0.1"}, "capabilities": {"experimentalApi": true}}}}
+{"id":1,"result":{"userAgent":"capture_daemon/0.155.1 (Ubuntu 24.4.0; x86_64) tmux-256color (capture_daemon; 0.1)","codexHome":"~/.codex","platformFamily":"unix","platformOs":"linux"}}
+{"sent": {"jsonrpc": "2.0", "method": "initialized", "params": {}}}
+{"sent": {"jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": {"cwds": ["~"]}}}
+{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"codex-host","installationId":"00000000-0000-0000-0000-000000000000","environmentId":null},"emittedAtMs":1790068596454}
+{"id":2,"result":{"data":[{"cwd":"~","hooks":[],"warnings":[],"errors":[]}]}}
+{"sent": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "capture_daemon", "version": "0.1"}, "capabilities": {"experimentalApi": true}}}}
+{"id":1,"result":{"userAgent":"capture_daemon/0.155.1 (Ubuntu 24.4.0; x86_64) tmux-256color (capture_daemon; 0.1)","codexHome":"~/.codex","platformFamily":"unix","platformOs":"linux"}}
+{"sent": {"jsonrpc": "2.0", "method": "initialized", "params": {}}}
+{"sent": {"jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": {"cwds": ["/tmp/codex-src"]}}}
+{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"codex-host","installationId":"00000000-0000-0000-0000-000000000000","environmentId":null},"emittedAtMs":1790068630708}
+{"id":2,"result":{"data":[{"cwd":"/tmp/codex-src","hooks":[{"key":"/tmp/codex-src/.codex/hooks.json:permission_request:0:0","eventName":"permissionRequest","handlerType":"command","command":"antiphon hook run ~/guard.sh","async":false,"matcher":"Bash","timeoutSec":600,"statusMessage":"antiphon: running the Claude hook guard.sh","additionalContextLimit":null,"sourcePath":"/tmp/codex-src/.codex/hooks.json","source":"project","pluginId":null,"displayOrder":0,"enabled":true,"isManaged":false,"currentHash":"sha256:7bec0129a83ea72f02bf8836285c270249b017a523cc6b55dce31dc92fab2b6d","trustStatus":"untrusted"}],"warnings":[],"errors":[]}]}}
