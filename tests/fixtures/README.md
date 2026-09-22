@@ -49,7 +49,20 @@ What it pins: `hook/started` and `hook/completed` (`run.eventName: "permissionRe
 
 Verdict (with the Codex source at this version, `codex-rs/core/src/tools/approvals.rs`, `Session::request_approval`): hooks run **first and only once**, before the automatic reviewer or the user prompt. A hook `allow` resolves the approval as approved with source "hook" and the reviewer never runs; a hook `deny` resolves it as denied (the command is rejected with the hook's message) and the reviewer never runs; only "no decision" reaches the reviewer. Nothing runs after a reviewer denial. So a Codex `PermissionRequest` hook cannot be the escalation surface for denials; the hook example ships as a guard only, and the bridge's approval path is the override-plus-retry below with the parent-as-reviewer fallback.
 
-Not captured: the second turn (the denial-shaped command) failed with `error{codexErrorInfo: "usageLimitExceeded"}` and `turn/completed{status: "failed"}` because the Codex account's 30-day window was exhausted; the live confirmation of the `allow`/`deny` short-circuits (hook modes `allow` and `deny`) is still to be run. The failed-turn frames at the end of the file are a valid capture of the turn-failure shape.
+The second turn of that run failed with `error{codexErrorInfo: "usageLimitExceeded"}` and `turn/completed{status: "failed"}`, which is a valid capture of the turn-failure shape. The `allow` and `deny` short-circuits the verdict rests on are captured separately, below.
+
+### `hook-allow.jsonl`, `hook-deny.jsonl`
+
+The same hook answering a decision instead of staying silent, one escalation each (a write outside the workspace), driven by `slice0/hook-modes.sh`:
+
+```
+capture_daemon.py --listen 5 \
+  thread/start '{"cwd":"~/antiphon-capture","approvalPolicy":"on-request","approvalsReviewer":"auto_review","sandbox":"workspace-write","ephemeral":false}' \
+  turn/start '{"threadId":"$THREAD","sandboxPolicy":{"type":"workspaceWrite","networkAccess":false},"input":[{"type":"text","text":"<write a file directly under ~>"}]}' \
+  @await turn/completed 300
+```
+
+What they pin, and the verdict the source predicted: a hook's own decision ends the approval. With `allow`, `hook/started` and `hook/completed` are followed straight by the command running (`item/completed` for a `commandExecution`, and the file exists afterwards) and the turn completing, with **no `item/autoApprovalReview/*` notification anywhere in the capture**. With `deny`, the same two hook notifications are followed by no command at all, no reviewer, and a completed turn; the file does not exist. So the automatic reviewer sees only what the hook declined to decide, and a hook cannot be the place a denial is escalated from, since after a denial nothing runs.
 
 ### `guardian-override.jsonl` (partial)
 
@@ -159,5 +172,6 @@ Not captured: `config/batchWrite` (the daemon-side write of `hooks.state.<key>.t
 ## Not yet captured
 
 - `mac/`: registry record, process-start line and socket directory from a macOS Claude Code install (optional).
-- Hook modes `allow` and `deny` on `permission-hook-order.jsonl`: the first usage window's captures showed `log` mode; `allow` and `deny` mode short-circuits remain to be confirmed.
-- Guardian override retry turns: `guardian-override.jsonl` pins the override call acceptance, but the `turn/start` "retry it now" failed with `codexErrorInfo: "cyberPolicy"` (server-side content block); the message-only path also self-refused.
+- What a retried command does after a guardian override: not capturable with a harmless payload, for the reason under `guardian-override.jsonl`.
+- What a terminal's own answer does to a request a silent second subscriber also holds (see `tui-routing.jsonl`).
+- A hook actually run by Codex through the shim, and `config/batchWrite` on a real daemon (see `hooks-list.jsonl`).
