@@ -367,14 +367,19 @@ class Approvals:
         if record.kind == "request":
             await self._answer(thread, record, {"decision": "accept"})
             return self._reply(thread, record)
+        # The override is recorded and the thread is told to retry, but the guardian
+        # re-reviews the retry: for an action it judges high-risk it denies again even
+        # with the recorded re-approval (captured, guardian-retry.jsonl). So this path
+        # is not a reliable way to run what the guardian refused; a thread whose
+        # escalations must be approvable by the spawner should be started
+        # --review-by-parent, where there is no guardian and the request is answered
+        # directly. `approve` here does what it can and says exactly that to the spawner.
         d = await self.bridge.ensure_loaded(thread)
         try:
             await d.approve_guardian_denied(thread.thread_id, guardian_event(record.review_completed_params))
         except DaemonError as e:
             # The override's payload shape is pinned only for a captured `command` action;
-            # when the daemon refuses it, the approval still reaches the thread as an
-            # instruction. Whether a retry after either path runs unreviewed, is re-reviewed
-            # and approved, or is denied again has not been captured.
+            # when the daemon refuses it, the approval still reaches the thread as an instruction.
             log.warning("override refused for %s (%s); approving by message instead: %r", record.token, thread.name, e)
             retry = f"I approve running `{record.command}` in `{record.cwd}`: retry it now."
         else:
