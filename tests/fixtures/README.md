@@ -95,6 +95,22 @@ What it pins, for an idle subscribed thread: the client sees EOF (`connection cl
 
 Not captured: the same with a turn in progress (whether the turn continues or dies).
 
+### `decline.jsonl`
+
+`approvalsReviewer: "user"`, `approvalPolicy: "on-request"`: two phases on separate threads, each with a write outside the workspace that produces `item/commandExecution/requestApproval`. The first answers with `{"decision": "decline"}`, the second with `{"decision": "cancel"}`. Both are accepted by the daemon (`serverRequest/resolved` arrives), the command is declined, and the turn completes normally (`status: completed` and `status: interrupted` respectively). Verdict: both `decline` and `cancel` are valid decision values on 0.155.1; they have the same effect on the command but different turn completion statuses.
+
+### `dropped-connection.jsonl`
+
+`approvalsReviewer: "user"`: one `user`-reviewer thread with a write outside the workspace producing `item/commandExecution/requestApproval`. The client closes the connection without answering, reconnects, resumes the thread, reads it, and interrupts the turn. Verdict: the pending request is re-sent on the new subscription; `thread/read` shows `activeFlags: ["waitingOnApproval"]`; `turn/interrupt` returns `{"result": {}}` and immediately emits `serverRequest/resolved` (the request is cleared and the turn → `interrupted`).
+
+### `tui-routing.jsonl`, `tui-routing.txt`
+
+`approvalsReviewer: "user"`: a two-phase capture on a shared thread. Phase A: a TUI initiated a command escalation in a session while a headless client was subscribed via `thread/resume`; phase B: the same thread is resumed by the TUI while the headless client starts a command escalation. Each phase's pane capture is appended to the `.txt` file. Verdict: the client-side connection receives `item/commandExecution/requestApproval` in both phases (escalation initiated by TUI or client, it reaches the subscribed client); the TUI renders the approval prompt in both phases (pane shows "•" markers and the prompt text). The bridge must subscribe to adopted threads to receive escalations; TUI-based escalations are not automatically forwarded without subscription.
+
+### `unconsumed-steer.jsonl`
+
+`approvalsReviewer: "auto_review"`: a fixed-length `sleep 40` turn. Midway through (at ~34s), a `turn/steer` call sends a `clientUserMessageId` with new input. The first turn completes with the steered text appended to the model's output. A follow-up turn asks whether the steer was received; the model confirms via the echoed `clientUserMessageId`. Verdict: `turn/steer` succeeds (result: `{"turnId": "..."}`); the echoed `userMessage` item with `clientId: "<clientUserMessageId>"` arrives **before** `turn/completed`; the steer consumed and the instruction applies to the current turn (late-arriving steers can still land if the turn is long enough).
+
 ### `peer-frames.jsonl`, `peer-frames-idle-notice.jsonl`
 
 Claude Code's peer protocol as seen by a stub peer: the registry record it wrote, an inbound `user` frame (`<cross-session-message from=... from-name=... from-mode=...>` body), the `notify_when_idle` control frame, and the `peer_message_status` and `peer_idle_notice` frames the stub sent back, the idle notice being the shape a Claude session rendered. `peer-frames.jsonl` also holds the stub's own outbound `user` frame to the Claude session (`kind: sent`) and one `sandbox_probe` control frame that a probe script running inside a Codex sandbox sent to the stub's socket; neither comes from Claude Code.
@@ -138,14 +154,6 @@ Not captured: `config/batchWrite` (the daemon-side write of `hooks.state.<key>.t
 
 ## Not yet captured
 
-The Codex account used for these captures reached 100% of its 30-day usage window (`account/rateLimits/read`: `planType: "free"`, `usedPercent: 100`, reset on 2026-10-21) while the first new capture was running. Everything that needs the model to take a turn is therefore still open, with the exact procedure ready to run:
-
-- `permission-hook-order.jsonl`: the denied escalation with the logging hook, then the same two prompts with the hook answering `allow` and `deny`.
-- `guardian-override.jsonl`: after the override, `turn/start` "retry it now"; on a fresh denial, the message-only "I approve running <command>: retry it now".
-- `decline.jsonl`: a `user`-reviewer request answered with `capture_daemon.py --respond decline` (fixes the `deny` mapping: `decline` if accepted, else `cancel`).
-- `dropped-connection.jsonl`: `... turn/start ... @await item/commandExecution/requestApproval @close @reconnect thread/resume ... thread/read ... turn/interrupt ...` (whether the request is re-sent, whether `thread/read` shows `waitingOnApproval`, whether `turn/interrupt` clears it).
-- `tui-routing.jsonl` + `.txt`: a `user`-reviewer headless thread, a TUI attached with `codex resume <id>` in a scratch tmux server, the client subscribed with `thread/resume`; escalations started from each side; which client receives the request and whether the TUI prompt renders.
-- `adoption.jsonl`: the TUI closed mid-turn.
-- `daemon-restart.jsonl`: a `sleep 90` turn in progress across the restart.
-- `unconsumed-steer.jsonl`: `turn/steer` with `clientUserMessageId` in the last seconds of a fixed-length `sleep` turn; whether the echoed `userMessage` item arrives before `turn/completed`.
 - `mac/`: registry record, process-start line and socket directory from a macOS Claude Code install (optional).
+- Hook modes `allow` and `deny` on `permission-hook-order.jsonl`: the first usage window's captures showed `log` mode; `allow` and `deny` mode short-circuits remain to be confirmed.
+- Guardian override retry turns: `guardian-override.jsonl` pins the override call acceptance, but the `turn/start` "retry it now" failed with `codexErrorInfo: "cyberPolicy"` (server-side content block); the message-only path also self-refused.
