@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 # at design time; no negative receipt from a real session has been captured yet.
 RECEIPT_WAIT = 2.0
 NEGATIVE_RECEIPTS = frozenset({"held", "dropped", "refused", "expired", "denied"})
+WAIT_DEFAULT_TIMEOUT = 600.0
 NO_PEER_YET = "has no peer identity yet (a Claude Code session must be running for the bridge to register peers)"
 
 
@@ -41,6 +42,7 @@ def install(bridge: Bridge) -> None:
     bridge.ops["send"] = side.op_send
     bridge.ops["notify"] = side.op_notify
     bridge.ops["name"] = side.op_name
+    bridge.ops["wait"] = side.op_wait
     bridge.child_events["status"] = side.on_child_status
     bridge.child_events["idle_notice"] = side.on_child_idle_notice
 
@@ -50,6 +52,7 @@ class CodexSide:
         self.bridge = bridge
         self.receipts: dict[str, asyncio.Future] = {}  # msg_id -> the status event a send is waiting for
         self.watched: dict[tuple[str, str], str] = {}  # (thread id, peer socket) -> the peer's name when notify ran
+        self.waits: dict[tuple[str, str], asyncio.Future] = {}  # (thread id, peer socket) -> a wait holding for that idle notice
 
     # --- ops ---------------------------------------------------------------------------
 
@@ -86,6 +89,39 @@ class CodexSide:
         self.watched[(own.thread_id, to_sock)] = name
         return {"name": name}
 
+    async def op_wait(self, args: dict, caller: Caller) -> dict:
+        """Wait for a Claude Code session to go idle; anything else is a thread and waits
+        on its turn. A session has no turns to watch, so this is the same idle subscription
+        `notify` makes, held until the notice comes back instead of relayed into the thread."""
+        session = self.bridge.started_session(args["target"])
+        if session is None:
+            return await self.bridge.op_wait(args, caller)
+        if caller.kind != "codex":
+            raise IpcError("usage", f"{session.name} is a Claude Code session: a Claude caller waits for one with "
+                                    "SendMessage and notify_when_idle")
+        record = registry.resolve_session(session.session_id, self.bridge.sessions_dir)
+        if record is None:
+            raise IpcError("precondition", f"{session.name} is no longer running")
+        own = self._own_thread(caller)
+        child = self._child_of(own, f"cannot wait for {session.name}")
+        key = (own.thread_id, record.socket_path)
+        waiter = asyncio.get_running_loop().create_future()
+        self.waits[key] = waiter
+        try:
+            await child.send(cmd="subscribe", to_sock=record.socket_path)
+            # An idle notice fires on the next turn end, so waiting for one on a session that
+            # is already idle would wait for a turn nobody has asked for. Read the status after
+            # subscribing, so a session that goes busy in between is still caught by the notice.
+            settled = registry.resolve_session(session.session_id, self.bridge.sessions_dir)
+            if settled is not None and settled.data.get("status") != "busy":
+                return {"status": "idle", "final": None, "name": session.name}
+            state, detail = await asyncio.wait_for(waiter, args.get("timeout") or WAIT_DEFAULT_TIMEOUT)
+        except TimeoutError as e:
+            raise IpcError("timeout", f"{session.name} has not gone idle within {args.get('timeout')} s") from e
+        finally:
+            self.waits.pop(key, None)
+        return {"status": state, "final": detail, "name": session.name}
+
     async def op_name(self, args: dict, caller: Caller) -> dict:
         target = args.get("target")
         if target is not None:
@@ -112,8 +148,13 @@ class CodexSide:
         if thread is None:
             return
         from_sock = event["from_sock"]
-        name = self.watched.pop((thread_id, from_sock), None) or self._peer_name(from_sock)
         detail = event.get("detail") or ""
+        waiter = self.waits.get((thread_id, from_sock))
+        if waiter is not None and not waiter.done():
+            # A `wait` is holding for exactly this notice; answering it is the delivery.
+            waiter.set_result((event.get("state"), detail))
+            return
+        name = self.watched.pop((thread_id, from_sock), None) or self._peer_name(from_sock)
         if event.get("state") == "idle":
             text = f"Peer {name} is idle: {detail}"
         else:

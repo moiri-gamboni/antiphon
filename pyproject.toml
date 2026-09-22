@@ -15,6 +15,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/antiphon"]
+# The forward hook travels with the code: `start --claude` points a session's --settings at
+# it, so it has to exist wherever antiphon is installed, not only in a checkout.
+force-include = { "hooks/claude-permission-forward.sh" = "antiphon/claude/claude-permission-forward.sh" }
 
 [dependency-groups]
 dev = ["pytest"]

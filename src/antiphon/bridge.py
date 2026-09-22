@@ -18,14 +18,17 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 
 from antiphon import callers, ipc, peers
 from antiphon.callers import Caller
+from antiphon.claude import launch as launch_mod
 from antiphon.claude import registry
 from antiphon.codex import approvals as approvals_mod
 from antiphon.codex import daemon as daemon_mod
@@ -34,7 +37,7 @@ from antiphon.codex.daemon import Daemon, DaemonError, DaemonUnavailable, delive
 from antiphon.codex.ws import TransportClosed
 from antiphon.ipc import IpcError
 from antiphon.rawlog import RawLog
-from antiphon.state import State, SubAgent, ThreadState, ensure_home
+from antiphon.state import Peer, SessionState, State, SubAgent, ThreadState, ensure_home
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +51,7 @@ OWNED_OPS = frozenset({"interrupt", "stop", "name", "approve", "deny"})
 # one is a usage error and a KeyError from inside a handler stays an internal error.
 REQUIRED_ARGS = {
     "start": ("cwd", "read_only", "report", "worktree", "review_by_parent"),
+    "start_claude": ("cwd",),
     "send": ("target", "text"),
     "interrupt": ("target",),
     "wait": ("target",),
@@ -57,7 +61,7 @@ REQUIRED_ARGS = {
     "approve": ("token",),
     "deny": ("token", "why"),
     "notify": ("target",),
-    "hook_ask": ("thread_id", "tool_name", "command", "cwd", "reason", "hook", "timeout"),
+    "hook_ask": ("asker", "tool_name", "command", "cwd", "reason", "hook", "timeout"),
     "hook_trust": ("key", "hash"),
 }
 WAIT_DEFAULT_TIMEOUT = 600.0
@@ -219,13 +223,16 @@ class Bridge:
     reconnect_backoff = (1.0, 30.0)
 
     def __init__(self, home, *, sessions_dir=None, codex_home=None, ensure_running=daemon_mod.ensure_running,
-                 process_table=None):
+                 process_table=None, launch_claude=launch_mod.launch, stop_claude=launch_mod.stop):
         self.home = Path(home)
         os.makedirs(self.home, 0o700, exist_ok=True)
         os.makedirs(self.home / "log", 0o700, exist_ok=True)
         self.sessions_dir = Path(sessions_dir) if sessions_dir else registry.sessions_dir()
         self.codex_home = str(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
         self._ensure_running = ensure_running
+        self._launch_claude = launch_claude
+        self._stop_claude = stop_claude
+        self.register_timeout = REGISTER_TIMEOUT
         self._process_table = process_table or callers.system_process_table()
         self.socket_path = self.home / "bridge.sock"
         self.state_path = self.home / "state.json"
@@ -253,6 +260,7 @@ class Bridge:
         self.ops = {
             "ping": self.op_ping,
             "start": self.op_start,
+            "start_claude": self.op_start_claude,
             "send": self.op_send,
             "interrupt": self.op_interrupt,
             "wait": self.op_wait,
@@ -383,14 +391,24 @@ class Bridge:
         if op in ("approve", "deny"):
             thread, _ = self.approvals.find(args["token"])
         else:
-            thread = self.resolve(args["target"])
+            thread = self.resolve_peer(args["target"])
         # A Codex thread renaming itself is not acting on another caller's thread.
-        spawner = None if op == "name" and thread.thread_id == caller.codex_thread else thread.spawner
+        renames_itself = op == "name" and isinstance(thread, ThreadState) and thread.thread_id == caller.codex_thread
+        spawner = None if renames_itself else thread.spawner
         if not callers.permits(caller, spawner):
             raise IpcError("forbidden", callers.forbidden_message(caller, op, spawner))
 
     def live_records(self) -> list[registry.Record]:
         return registry.live_records(self.sessions_dir)
+
+    def peers(self) -> list[Peer]:
+        """Everything the bridge holds ownership and escalations for: the Codex threads it
+        hosts and the Claude Code sessions it started."""
+        return [*self.state.threads.values(), *self.state.sessions.values()]
+
+    def peer(self, key: str) -> Peer | None:
+        """The hosted thread or started session with this id."""
+        return self.state.threads.get(key) or self.state.sessions.get(key)
 
     # --- daemon connection ----------------------------------------------------------
 
@@ -850,8 +868,8 @@ class Bridge:
             thread.child_pid = None
             self.save()
 
-    async def deliver_to_spawner(self, thread: ThreadState, text: str) -> bool:
-        """Get `text` to whoever spawned `thread`: a Claude session's socket (looked up by
+    async def deliver_to_spawner(self, thread: Peer, text: str) -> bool:
+        """Get `text` to whoever started `thread`: a Claude session's socket (looked up by
         session id now, since the session's pid may have changed), a Codex thread as a turn,
         or, for a human, nowhere but the log. True when it was handed over."""
         spawner = thread.spawner
@@ -869,7 +887,10 @@ class Bridge:
         if record is None:
             log.warning("spawner %s of %s is gone (no live Claude record); dropping: %.80s", spawner, thread.name, text)
             return False
-        child = self.children.get(thread.thread_id)
+        # A frame to a Claude session leaves a peer child's socket, and only a hosted Codex
+        # thread has one: a session antiphon started reports to its own spawner, never to a
+        # third session. `start --claude` refuses a Claude caller for the same reason.
+        child = self.children.get(thread.thread_id) if isinstance(thread, ThreadState) else None
         if child is None:
             log.warning("%s has no peer child to deliver from; dropping: %.80s", thread.name, text)
             return False
@@ -924,6 +945,17 @@ class Bridge:
         if registry.by_name(target, self.sessions_dir) is not None:
             raise IpcError("not_a_thread", f"{target!r} is a Claude Code session, not a Codex thread")
         raise IpcError("unknown_target", f"no thread named {target!r}")
+
+    def started_session(self, target: str) -> SessionState | None:
+        """The Claude Code session antiphon started that a caller means, by name or id."""
+        by_name = [s for s in self.state.sessions.values() if s.name == target]
+        if len(by_name) == 1:
+            return by_name[0]
+        return self.state.sessions.get(target)
+
+    def resolve_peer(self, target: str) -> Peer:
+        """The hosted Codex thread or started Claude session a caller means."""
+        return self.started_session(target) or self.resolve(target)
 
     def _stopped_id(self, target: str) -> str | None:
         """The thread id a stopped thread's former name, id or id prefix refers to."""
@@ -990,6 +1022,49 @@ class Bridge:
             await self.ensure_peer(thread)
         return {"name": name, "thread_id": thread_id, "cwd": cwd}
 
+    async def op_start_claude(self, args: dict, caller: Caller) -> dict:
+        """Start a Claude Code session the caller owns. The session registers itself, so
+        the bridge waits for that record rather than building one."""
+        if caller.kind == "claude":
+            raise IpcError("usage", "a Claude Code session starts another with its own Agent tool; "
+                                    "antiphon start --claude is for callers that have no such tool")
+        self._require_known_codex_caller(caller)
+        cwd = args["cwd"]
+        wanted = args.get("name") or f"claude-{os.path.basename(cwd.rstrip('/'))}"
+        spec = launch_mod.Spec(
+            session_id=str(uuid.uuid4()), name=registry.unique_name(wanted, self.taken_names()), cwd=cwd,
+            model=args.get("model"), hook=launch_mod.forward_hook(), gate=args.get("gate"), prompt=args.get("prompt"),
+        )
+        try:
+            launched = await self._launch_claude(spec)
+        except launch_mod.LaunchFailed as e:
+            raise IpcError("precondition", str(e)) from e
+        record = await self._await_registration(spec.session_id)
+        if record is None:
+            # The command started something antiphon cannot address. Its output names the
+            # session, so `claude agents` and `claude stop` can still reach it by hand.
+            raise IpcError("precondition", f"{spec.name} did not register as a peer within "
+                           f"{self.register_timeout:g} s of {shlex.join(launched.argv)}; "
+                           f"it said: {launched.stdout.strip() or '(nothing)'}")
+        session = SessionState(session_id=spec.session_id, name=record.name, cwd=cwd,
+                               spawner=caller.owner_id, job_id=record.data.get("jobId"))
+        self.state.sessions[spec.session_id] = session
+        self.save()
+        log.info("started the Claude Code session %s (session %s, pid %s, job %s)",
+                 record.name, spec.session_id, record.pid, session.job_id)
+        return {"name": record.name, "session_id": spec.session_id, "cwd": cwd, "pid": record.pid,
+                "job_id": session.job_id, "hook": spec.hook}
+
+    async def _await_registration(self, session_id: str) -> registry.Record | None:
+        """The record of the session with this id, once it carries the name the session was
+        given: the first record a session writes still has its derived name (observed)."""
+        deadline = time.monotonic() + self.register_timeout
+        while True:
+            record = registry.resolve_session(session_id, self.sessions_dir)
+            if (record is not None and record.data.get("nameSource") != "derived") or time.monotonic() >= deadline:
+                return record
+            await asyncio.sleep(0.05)
+
     def _add_worktree(self, cwd: str, name: str) -> str:
         top = _git(["rev-parse", "--show-toplevel"], cwd, self.rawlog)
         if top.returncode != 0:
@@ -1031,6 +1106,10 @@ class Bridge:
         return {"kind": delivery.kind, "turn_id": delivery.turn_id, "thread_id": thread.thread_id, "name": thread.name}
 
     async def op_interrupt(self, args: dict, caller: Caller) -> dict:
+        if self.started_session(args["target"]) is not None:
+            # Claude Code has no surface for it: a session takes a message or it stops.
+            raise IpcError("usage", f"{args['target']} is a Claude Code session, and there is no way to interrupt "
+                                    f"one: send it a correction, or antiphon stop {args['target']}")
         thread = self.resolve(args["target"])
         d = await self._require_daemon()
         turn_id = thread.active_turn_id
@@ -1070,8 +1149,15 @@ class Bridge:
                 "threads": len(self.state.threads),
                 "degraded": self.state.degraded,
             }
+        session = self.started_session(target)
+        if session is not None:
+            return {
+                "kind": "claude", "name": session.name, "session_id": session.session_id, "cwd": session.cwd,
+                "spawner": session.spawner, "job_id": session.job_id, "pending": self.approvals.labels(session),
+            }
         thread = self.resolve(target)
         return {
+            "kind": "codex",
             "name": thread.name, "thread_id": thread.thread_id, "cwd": thread.cwd, "origin": thread.origin,
             "spawner": thread.spawner, "status": thread.status, "active_turn_id": thread.active_turn_id,
             "pending": self.approvals.labels(thread), "last_error": thread.last_error, "final": thread.final,
@@ -1086,9 +1172,13 @@ class Bridge:
         for record in self.live_records():
             if record.pid in child_pids:
                 continue
+            session = self.state.sessions.get(record.data.get("sessionId"))
+            labels = self.approvals.labels(session) if session is not None else []
             rows.append({
-                "name": record.data.get("name"), "kind": "claude", "status": record.data.get("status"),
-                "cwd": record.data.get("cwd"), "self": caller.kind == "claude" and record.data.get("sessionId") == caller.claude_session_id,
+                "name": record.data.get("name"), "kind": "claude",
+                "status": labels[0] if labels else record.data.get("status"),
+                "cwd": record.data.get("cwd"), "spawner": session.spawner if session is not None else None,
+                "self": caller.kind == "claude" and record.data.get("sessionId") == caller.claude_session_id,
             })
         for thread in self.state.threads.values():
             rows.append({"name": thread.name, "kind": "codex", "status": self.approvals.status_label(thread), "cwd": thread.cwd,
@@ -1100,6 +1190,9 @@ class Bridge:
         return rows
 
     async def op_stop(self, args: dict, caller: Caller) -> dict:
+        session = self.started_session(args["target"])
+        if session is not None:
+            return await self._stop_session(session)
         thread = self.resolve(args["target"])
         d = self.daemon
         if d is not None:
@@ -1122,6 +1215,18 @@ class Bridge:
                 reply["worktree_reason"] = reason
         self.save()
         return reply
+
+    async def _stop_session(self, session: SessionState) -> dict:
+        """End a Claude Code session antiphon started. Claude Code runs it, so this asks
+        Claude Code to end the job rather than signalling a process of ours."""
+        if session.job_id is None:
+            raise IpcError("precondition", f"{session.name} has no background job recorded; find it with "
+                                           "`claude agents` and end it with `claude stop <id>`")
+        await asyncio.to_thread(self._stop_claude, session.job_id)
+        del self.state.sessions[session.session_id]
+        self.save()
+        log.info("stopped the Claude Code session %s (job %s)", session.name, session.job_id)
+        return {"name": session.name, "session_id": session.session_id, "job_id": session.job_id}
 
     async def op_resume(self, args: dict, caller: Caller) -> dict:
         self._require_known_codex_caller(caller)

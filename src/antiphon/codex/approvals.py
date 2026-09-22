@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING
 from antiphon.callers import Caller
 from antiphon.codex.daemon import DaemonError
 from antiphon.ipc import IpcError
-from antiphon.state import ThreadState
+from antiphon.state import Peer, SessionState, ThreadState
 
 if TYPE_CHECKING:
     from antiphon.bridge import Bridge
@@ -54,7 +54,7 @@ REPLY_COMMANDS = "Reply with: antiphon approve {token}   or   antiphon deny {tok
 @dataclass
 class Pending:
     token: str
-    thread_id: str
+    asker: str  # the hosted Codex thread, or the Claude Code session, whose action is held
     turn_id: str | None
     command: str
     cwd: str
@@ -67,9 +67,8 @@ class Pending:
     request_id: int | str | None
     epoch: int | None
     # What the daemon offered on a blocking request. Nothing reads it since `deny` stopped
-    # choosing between `decline` and `cancel`; it is kept because dropping a field makes
-    # `Pending(**p)` raise on a state file an older bridge wrote, and there is no migration
-    # step to hang that on. Drop it with the next state-schema change.
+    # choosing between `decline` and `cancel`; it is kept only so a record round-trips
+    # through the state file unchanged.
     available_decisions: list | None
     reminded: bool = False
     hook: str | None = None  # the Claude hook script that asked, for kind "hook"
@@ -77,6 +76,14 @@ class Pending:
     @property
     def label(self) -> str:
         return {"denied": "denied", "hook": "hook"}.get(self.kind, "approval")
+
+
+def holding(peer: Peer, record: Pending) -> str:
+    """What is holding the action, named for the spawner being asked: a Claude Code
+    session antiphon started, or a Claude hook script running inside a Codex thread."""
+    if isinstance(peer, SessionState):
+        return f'the Claude Code session "{peer.name}"'
+    return f'the Claude hook {record.hook} in "{peer.name}"'
 
 
 def token_for(key: str) -> str:
@@ -150,40 +157,40 @@ class Approvals:
 
     # --- the records ------------------------------------------------------------------
 
-    def pending(self, thread: ThreadState) -> list[Pending]:
+    def pending(self, thread: Peer) -> list[Pending]:
         return [Pending(**p) for p in thread.pending]
 
-    def _store(self, thread: ThreadState, records: list[Pending]) -> None:
+    def _store(self, thread: Peer, records: list[Pending]) -> None:
         thread.pending = [dataclasses.asdict(p) for p in records]
         self.bridge.save()
 
-    def _add(self, thread: ThreadState, record: Pending) -> None:
+    def _add(self, thread: Peer, record: Pending) -> None:
         self._store(thread, [*self.pending(thread), record])
 
-    def _update(self, thread: ThreadState, record: Pending) -> None:
+    def _update(self, thread: Peer, record: Pending) -> None:
         self._store(thread, [record if p.token == record.token else p for p in self.pending(thread)])
 
-    def find(self, token: str) -> tuple[ThreadState, Pending]:
-        for thread in self.bridge.state.threads.values():
+    def find(self, token: str) -> tuple[Peer, Pending]:
+        for thread in self.bridge.peers():
             for record in self.pending(thread):
                 if record.token == token:
                     return thread, record
         raise IpcError("unknown_target", f"no pending approval with token {token!r}")
 
-    def _unresolved(self, token: str) -> tuple[ThreadState, Pending]:
+    def _unresolved(self, token: str) -> tuple[Peer, Pending]:
         thread, record = self.find(token)
         if record.resolved:
             raise IpcError("precondition", f"approval {token} was already resolved")
         return thread, record
 
-    def _resolve(self, thread: ThreadState, record: Pending) -> None:
+    def _resolve(self, thread: Peer, record: Pending) -> None:
         record.resolved = True
         self._update(thread, record)
 
-    def _drop(self, thread: ThreadState, record: Pending) -> None:
+    def _drop(self, thread: Peer, record: Pending) -> None:
         self._store(thread, [p for p in self.pending(thread) if p.token != record.token])
 
-    def labels(self, thread: ThreadState) -> list[str]:
+    def labels(self, thread: Peer) -> list[str]:
         """`denied <token> <age>` / `approval <token> <age>` / `hook <token> <age>` for each
         unanswered escalation."""
         now = self.clock()
@@ -203,7 +210,7 @@ class Approvals:
             return
         command, cwd = describe_action(params["action"])
         record = Pending(
-            token=token_for(params["reviewId"]), thread_id=thread.thread_id, turn_id=params["turnId"], command=command, cwd=cwd,
+            token=token_for(params["reviewId"]), asker=thread.thread_id, turn_id=params["turnId"], command=command, cwd=cwd,
             rationale=params["review"]["rationale"], risk_level=params["review"]["riskLevel"],
             review_completed_params=params, since=self.clock(), resolved=False,
             kind="denied", request_id=None, epoch=None, available_decisions=None,
@@ -247,7 +254,7 @@ class Approvals:
             log.info("approval request %s on %s was re-sent as id %s", token, thread.name, request_id)
             return
         record = Pending(
-            token=token, thread_id=thread.thread_id,
+            token=token, asker=thread.thread_id,
             turn_id=params["turnId"], command=params["command"], cwd=params["cwd"],
             rationale=params["reason"], risk_level=None, review_completed_params=None,
             since=self.clock(), resolved=False, kind="request", request_id=request_id, epoch=self.bridge.daemon.epoch,
@@ -270,13 +277,17 @@ class Approvals:
     # --- a Claude hook that answered ask: blocked until the spawner answers ----------------
 
     async def op_hook_ask(self, args: dict, caller: Caller) -> dict:
-        """Block the shim's tool call on the spawner's answer; `{"decision", "why", "token"}`.
-        The hook's timeout is the shim's budget: unanswered by then, the answer is deny."""
-        thread = self.bridge.state.threads.get(args["thread_id"])
+        """Block a tool call on the spawner's answer; `{"decision", "why", "token"}`.
+
+        Both directions arrive here: a Claude Code hook script the shim runs inside a
+        Codex thread, and the forward hook inside a Claude Code session antiphon started.
+        The hook's timeout is the budget: unanswered by then, the answer is deny.
+        """
+        thread = self.bridge.peer(args["asker"])
         if thread is None:
-            raise IpcError("unknown_target", f"{args['thread_id']} is not a thread antiphon hosts")
+            raise IpcError("unknown_target", f"{args['asker']} is not a thread or session antiphon hosts")
         record = Pending(
-            token=token_for(f"hook:{thread.thread_id}:{time.time_ns()}"), thread_id=thread.thread_id, turn_id=args.get("turn_id"),
+            token=token_for(f"hook:{args['asker']}:{time.time_ns()}"), asker=args["asker"], turn_id=args.get("turn_id"),
             command=args["command"], cwd=args["cwd"], rationale=args["reason"], risk_level=None, review_completed_params=None,
             since=self.clock(), resolved=False, kind="hook", request_id=None, epoch=None, available_decisions=None,
             hook=args["hook"],
@@ -284,10 +295,10 @@ class Approvals:
         self._add(thread, record)
         waiter = asyncio.get_running_loop().create_future()
         self._hook_waiters[record.token] = waiter
-        log.warning("the Claude hook %s asks before %r in %s (token %s)", record.hook, record.command, thread.name, record.token)
+        log.warning("%s asks before %r (token %s)", holding(thread, record), record.command, record.token)
         if thread.spawner == "human":
             log.warning("%s has no spawner to ask; answer from a shell: antiphon approve %s", thread.name, record.token)
-        head = f'The Claude hook {record.hook} asks before an action runs in "{thread.name}" (token {record.token}): {record.rationale}'
+        head = f"Permission needed: {holding(thread, record)} asks before an action runs (token {record.token}): {record.rationale}"
         self._notify(thread, record, head, "The tool call is blocked until you answer.")
         try:
             decision, why = await asyncio.wait_for(waiter, args["timeout"])
@@ -300,7 +311,7 @@ class Approvals:
             self._hook_waiters.pop(record.token, None)
         return {"decision": decision, "why": why, "token": record.token}
 
-    def _settle_hook(self, thread: ThreadState, record: Pending, decision: str, why: str | None) -> None:
+    def _settle_hook(self, thread: Peer, record: Pending, decision: str, why: str | None) -> None:
         waiter = self._hook_waiters.get(record.token)
         if waiter is None or waiter.done():
             self._drop(thread, record)
@@ -313,7 +324,7 @@ class Approvals:
         the spawner once of a request or a blocked hook that has waited long enough."""
         d = self.bridge.daemon
         now = self.clock()
-        for thread in list(self.bridge.state.threads.values()):
+        for thread in self.bridge.peers():
             for record in self.pending(thread):
                 if record.kind == "denied" or record.resolved:
                     continue
@@ -328,13 +339,13 @@ class Approvals:
                     self._update(thread, record)
                     waited = age(now - record.since)
                     if record.kind == "hook":
-                        head = f'Still waiting: the Claude hook {record.hook} in "{thread.name}" (token {record.token}) has blocked an action for {waited}: {record.rationale}'
+                        head = f"Still waiting: {holding(thread, record)} has blocked an action for {waited} (token {record.token}): {record.rationale}"
                         self._notify(thread, record, head, "The tool call stays blocked until you answer.")
                     else:
                         head = f'Still waiting: the action in "{thread.name}" (token {record.token}) has been blocked for {waited}: {record.rationale}'
                         self._notify(thread, record, head, "The turn stays blocked until you answer.")
 
-    def _notify(self, thread: ThreadState, record: Pending, head: str, tail: str) -> None:
+    def _notify(self, thread: Peer, record: Pending, head: str, tail: str) -> None:
         cwd = f"  cwd: {record.cwd}\n" if record.cwd else ""
         text = f"{head}\n  command: {record.command}\n{cwd}{tail} {REPLY_COMMANDS.format(token=record.token)}"
         self.bridge._spawn(self.bridge.deliver_to_spawner(thread, text), "antiphon-approval-notice")
@@ -427,7 +438,7 @@ class Approvals:
         await d.respond(record.request_id, result)
         self._resolve(thread, record)
 
-    def _lost(self, thread: ThreadState, record: Pending) -> None:
+    def _lost(self, thread: Peer, record: Pending) -> None:
         """A request whose connection dropped and whose thread has since stopped waiting on
         approval: the daemon let it go, so no re-send will give it an id to answer on. The
         record is dropped, not kept resolved, and the spawner is told the turn moved on
@@ -452,19 +463,22 @@ class Approvals:
             ) from e
 
     @staticmethod
-    def _reply(thread: ThreadState, record: Pending) -> dict:
-        return {"token": record.token, "kind": record.kind, "name": thread.name, "thread_id": thread.thread_id, "command": record.command}
+    def _reply(thread: Peer, record: Pending) -> dict:
+        return {"token": record.token, "kind": record.kind, "name": thread.name, "asker": record.asker, "command": record.command}
 
 
 def install(bridge: Bridge) -> Approvals:
     """Register the approval handlers and ops on a bridge; returns the handler object."""
     approvals = Approvals(bridge)
-    for thread in bridge.state.threads.values():
+    for thread in bridge.peers():
         # A request's id lives on the connection it arrived on, which died with the previous
         # bridge process; the daemon re-sends it on the new subscription while the thread is
         # still waiting, and the sweep retires it when it is not. A blocked hook lived in an
-        # op of that process: nobody waits on it any more, so it is forgotten.
-        thread.pending = [record for record in thread.pending if record["kind"] != "hook"]
+        # op of that process: nobody waits on it any more, so it is forgotten. A record an
+        # older bridge wrote in a shape this one cannot read goes the same way, rather than
+        # stopping this bridge from starting at all.
+        thread.pending = [record for record in thread.pending
+                          if record["kind"] != "hook" and "asker" in record]
         for record in thread.pending:
             if record["kind"] == "request":
                 record["epoch"] = None

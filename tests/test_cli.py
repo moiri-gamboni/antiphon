@@ -267,7 +267,7 @@ def test_wait_reports_a_stopped_or_unloaded_thread_as_a_non_success(tmp_path):
 
         def call(self, op, args=None, timeout=30):
             if op == "status":
-                return {"thread_id": "t1"}
+                return {"kind": "codex", "thread_id": "t1"}
             return {"status": "stopped", "final": None, "thread_id": "t1"}
 
     assert cli._wait(FakeClient(), "helper", None) == 6
@@ -660,3 +660,81 @@ def test_the_bridge_subcommand_runs_in_the_foreground_and_yields_to_a_running_br
     done = rig.run_subprocess("bridge")
     assert done.returncode == 0
     assert "already answers" in done.stderr
+
+
+# --- start --claude: a Claude Code session of the caller's own ---------------------------
+
+
+class RecordingClient:
+    """A client that answers `status` and `start_claude` from a script and records the calls."""
+
+    def __init__(self, tmp_path, **replies):
+        self.home = tmp_path
+        self.calls: list[tuple[str, dict]] = []
+        self.replies = replies
+
+    def call(self, op, args=None, timeout=30):
+        self.calls.append((op, args or {}))
+        return self.replies[op]
+
+
+STARTED_SESSION = {"name": "helper", "session_id": "1ec2f3d4-0000-4000-8000-000000000001",
+                   "cwd": "/work", "pid": 4242, "job_id": "1ec2f3d4", "hook": "/repo/hooks/forward.sh"}
+
+
+def start_claude_args(**overrides):
+    parsed = cli.build_parser().parse_args(["start", "--claude", "-C", "/work", "-n", "helper"])
+    for key, value in overrides.items():
+        setattr(parsed, key, value)
+    return parsed
+
+
+def test_start_claude_passes_the_directory_name_model_gate_and_prompt(tmp_path, capsys):
+    client = RecordingClient(tmp_path, start_claude=STARTED_SESSION)
+    args = start_claude_args(model="sonnet", gate="Bash", prompt=["read", "the", "diff"])
+    assert cli.verb_start(args, client) == 0
+    [(op, sent)] = client.calls
+    assert op == "start_claude"
+    assert sent["cwd"] == "/work" and sent["name"] == "helper"
+    assert sent["model"] == "sonnet" and sent["gate"] == "Bash"
+    assert sent["prompt"] == "read the diff"
+    assert "helper" in capsys.readouterr().out
+
+
+def test_start_claude_refuses_the_flags_that_only_fit_a_codex_thread(tmp_path, capsys):
+    client = RecordingClient(tmp_path, start_claude=STARTED_SESSION)
+    assert cli.verb_start(start_claude_args(read_only=True), client) == 2
+    assert client.calls == []
+    assert "--read-only" in capsys.readouterr().err
+
+
+def test_start_claude_says_so_when_no_forward_hook_was_installed(tmp_path, capsys):
+    client = RecordingClient(tmp_path, start_claude={**STARTED_SESSION, "hook": None})
+    assert cli.verb_start(start_claude_args(), client) == 0
+    assert "decides its own permissions" in capsys.readouterr().err
+
+
+def test_attach_on_a_session_prints_the_command_that_opens_it(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)
+    client = RecordingClient(tmp_path, status={"kind": "claude", "name": "helper", "job_id": "1ec2f3d4", "cwd": "/work"})
+    args = cli.build_parser().parse_args(["attach", "helper"])
+    assert cli.verb_attach(args, client) == 0
+    assert capsys.readouterr().out.strip() == "claude attach 1ec2f3d4"
+
+
+def test_attach_on_a_session_with_no_job_recorded_says_where_to_look(tmp_path, capsys):
+    client = RecordingClient(tmp_path, status={"kind": "claude", "name": "helper", "job_id": None, "cwd": "/work"})
+    args = cli.build_parser().parse_args(["attach", "helper"])
+    assert cli.verb_attach(args, client) == 2
+    assert "claude agents" in capsys.readouterr().err
+
+
+def test_wait_on_a_session_waits_on_its_session_id(tmp_path, capsys):
+    client = RecordingClient(
+        tmp_path,
+        status={"kind": "claude", "session_id": "1ec2f3d4-0000-4000-8000-000000000001"},
+        wait={"status": "idle", "final": "done", "name": "helper"},
+    )
+    assert cli._wait(client, "helper", 5) == 0
+    assert client.calls[1] == ("wait", {"target": "1ec2f3d4-0000-4000-8000-000000000001", "timeout": 5})
+    assert capsys.readouterr().out == "done\n"
