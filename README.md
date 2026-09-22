@@ -45,6 +45,10 @@ Options go before the `--` separator; everything after it is the prompt or messa
 | `notify TARGET` | From inside a Codex thread: one message back when the target's turn next ends | 2 from a Claude session (use `notify_when_idle`) or a terminal |
 | `approve TOKEN` | Approves the escalation with that token | 2 unknown token, already resolved, or lost with the Codex connection; 3 the retry could not be delivered |
 | `deny TOKEN -- WHY` | Denies it, telling the thread why | as `approve` |
+| `hook install SCRIPT [--event PreToolUse\|PermissionRequest\|PostToolUse] [--matcher TOOL] [--timeout S]` | Registers a Claude Code hook script in `~/.codex/hooks.json` (default event `PreToolUse`, every tool, 600 s) running through `antiphon hook run`, and trusts it through the Codex daemon | 2 Codex does not list the hook, or did not trust it |
+| `hook uninstall SCRIPT` | Removes the script's entry from `hooks.json` | 2 not installed |
+| `hook list` | The installed scripts with their event, matcher, timeout and Codex trust status | |
+| `hook run SCRIPT [--event E] [--timeout S]` | The shim Codex runs: Codex hook input on stdin, Codex hook output on stdout (see [Running your Claude Code hooks in Codex](#running-your-claude-code-hooks-in-codex)) | 2 stdin is not a Codex hook input |
 | `bridge` | Runs the bridge in the foreground (what the service runs) | |
 
 Exit codes overall: 0 ok; 1 no bridge answered and none could be started (the message quotes the last lines of `log/bridge.out`), or an op failed inside the bridge (the message names the exception; the traceback is in the bridge log); 2 usage, precondition (including a `start`, `interrupt`, `name` or `resume` the daemon refused), unknown target, or a caller that may not act on that thread; 3 delivery rejected (the daemon or the receiving session refused a `send`, `approve` or `deny`); 4 timeout; 5 Codex daemon unreachable; 6 turn failed or interrupted (or the thread stopped or unloaded during a wait).
@@ -99,16 +103,39 @@ An approval that arrives as a message is decided by the receiving Claude; a mess
 
 Any other command passes through the hook untouched.
 
-### Codex hooks as guards
+## Running your Claude Code hooks in Codex
 
-Codex runs `PermissionRequest` hooks first and only once, before the automatic reviewer: a hook `allow` or `deny` settles the escalation and the reviewer never runs; no output lets the reviewer decide; nothing runs after a reviewer denial, so a hook cannot be the forwarding surface for denials. Hooks are the place for command guards, as they are in Claude Code. `hooks/codex-block-pattern.sh` denies escalated commands matching a pattern; register it in `~/.codex/hooks.json`:
+A PreToolUse guard you already run under Claude Code (deny `rm -rf`, deny ad-hoc writes to some API, ask before touching a directory) runs unchanged on the Codex threads antiphon spawns and on any Codex session on the machine. Codex's hook events mirror Claude Code's; `antiphon hook run` translates the input and output field by field, and a hook that answers `ask` blocks the tool call while the question goes to whoever spawned the thread.
 
-```json
-{"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [
-  {"type": "command", "command": "<repo>/hooks/codex-block-pattern.sh 'rm -rf|git push --force'", "timeout": 5}]}]}}
+To install one guard:
+
+```
+antiphon hook install ~/.claude/hooks/no-force-push.sh --matcher Bash
 ```
 
-A user hook runs only once trusted: the `/hooks` command in the Codex TUI records the hook's hash under `[hooks.state."<key>"] trusted_hash` in `config.toml` (the `currentHash` that `hooks/list` reports), or Codex is started with `--dangerously-bypass-hook-trust`. `tests/fixtures/README.md` (`permission-hook-order.jsonl`) records the hook input and ordering this rests on.
+This appends an entry to `~/.codex/hooks.json` (created if absent; other entries are left alone) whose command is `antiphon hook run <script> --timeout 600`, asks the Codex daemon for the hook's key and hash, and records the hash as trusted in `~/.codex/config.toml` the way the Codex TUI's `/hooks` command does. The verb exits 2 if Codex does not list the hook afterwards, printing Codex's own warnings. Threads started after the install run the hook; a thread already running keeps the hook set it started with. `antiphon hook list` shows each installed script with its trust status; `antiphon hook uninstall <script>` removes the entry (the trusted hash stays in `config.toml`, where it matches nothing else).
+
+Pick the event to match the Claude event the script was written for: `--event PreToolUse` (the default) runs before every tool call, as in Claude Code; `--event PermissionRequest` runs only when a call needs approval, before Codex's automatic reviewer, and a decision there settles the escalation; `--event PostToolUse` runs after the call, where `decision: block` replaces the tool result with the reason. `--matcher` takes a tool name (`Bash`), a `|`-separated list, or a regex, as in Claude Code; Codex names its shell tool `Bash` too.
+
+When the script answers `ask`, the thread's spawner gets a message with a token:
+
+```
+The Claude hook no-force-push.sh asks before an action runs in "<name>" (token a1b2c3): <the script's reason>
+  command: <command>
+  cwd: <cwd>
+The tool call is blocked until you answer. Reply with: antiphon approve a1b2c3   or   antiphon deny a1b2c3 -- <why>
+```
+
+`approve` lets the call run; `deny` blocks it with your reason as the hook's message; `antiphon ls` shows `hook a1b2c3 <age>` meanwhile, and the spawner is reminded once after ten minutes. Codex kills a hook at its timeout (600 s unless `--timeout` set another value), so an unanswered `ask` ends as a deny naming the token, and the record is dropped; a timeout under about six seconds leaves no time to forward an `ask` at all, and such an `ask` is denied at once (a script that only allows or denies is fine with any timeout). If nothing can be asked at all (no bridge, a thread antiphon does not host), the call is denied with the script's reason.
+
+Limits:
+
+- A thread a human started in a terminal has no spawner to message: the `ask` still blocks and shows in `antiphon ls`; answer it from a shell with `antiphon approve <token>` before the timeout, or it is denied.
+- The script sees the Claude input fields Codex can supply: `session_id` (the Codex thread id), `transcript_path` (may be `null`), `cwd`, `permission_mode`, `tool_name`, `tool_input`, `tool_use_id` (absent on a `PermissionRequest`), `tool_response`, `agent_id`, `agent_type`, plus Codex's own `model` and `turn_id`. `prompt_id`, `scratchpad_dir` and `effort` have no Codex source and are absent.
+- On a Codex `PreToolUse`, a plain `allow` prints nothing (Codex accepts `allow` only together with an input rewrite); on a `PermissionRequest`, an input rewrite (`updatedInput`) cannot be applied and the call is denied instead. `additionalContext` reaches Codex on `PreToolUse` and `PostToolUse`, not on `PermissionRequest`. Output that looks like JSON but is not denies with the raw text; a deny with no reason gets one, since Codex would treat it as invalid and proceed.
+- The shim logs every hook input, the mapped input, the script's exit and output, and the answer to `~/.antiphon/log/hooks.jsonl`.
+
+`tests/fixtures/README.md` (`permission-hook-order.jsonl`, `hooks-list.jsonl`, `codex-hook-schemas/`) records the hook input, the ordering before the reviewer, the `hooks/list` reply and the schemas this rests on.
 
 ## Attaching a terminal
 
