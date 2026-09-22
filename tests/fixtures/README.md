@@ -182,6 +182,8 @@ show is a negative:
   why the bridge waits for a record whose `nameSource` is not `derived`.
 - an interactive session is `kind: "interactive"`, `entrypoint: "cli"`.
 
+The same run showed a session's `status` going `busy` then `idle` across its turn, with `statusUpdatedAt` moving with it; only the settled `idle` is in the committed line, and nothing in the package reads either value.
+
 ### `sub-agent.jsonl`
 
 Two parts. First, a thread with multi-agent enabled asked to spawn one sub-agent with `spawn_agent`, wait for it and list its agents, seen from the connection subscribed to the root thread: the sub-agent's own `thread/status/changed`, `turn/started` and `turn/completed` arrive on that subscription, the root emits `subAgentActivity` items (`kind` `started`/`interacted`/`completed`, `agentThreadId`, `agentPath: "/root/helper"`) and `collabAgentToolCall` items, and the final answer carries `list_agents`' output (`{"agents":[{"agent_name":"/root","agent_status":"running"},{"agent_name":"/root/helper","agent_status":{"completed":"..."}}]}`). Second, appended later once both threads had been unloaded:

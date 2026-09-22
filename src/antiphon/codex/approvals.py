@@ -66,9 +66,8 @@ class Pending:
     kind: str  # "denied": the reviewer's denial, nothing blocks; "request": a blocking server request; "hook": a blocked hook
     request_id: int | str | None
     epoch: int | None
-    # What the daemon offered on a blocking request. Nothing reads it since `deny` stopped
-    # choosing between `decline` and `cancel`; it is kept only so a record round-trips
-    # through the state file unchanged.
+    # What the daemon offered on a blocking request. Nothing has read it since `deny`
+    # stopped choosing between `decline` and `cancel`.
     available_decisions: list | None
     reminded: bool = False
     hook: str | None = None  # the Claude hook script that asked, for kind "hook"
@@ -157,44 +156,44 @@ class Approvals:
 
     # --- the records ------------------------------------------------------------------
 
-    def pending(self, thread: Peer) -> list[Pending]:
-        return [Pending(**p) for p in thread.pending]
+    def pending(self, peer: Peer) -> list[Pending]:
+        return [Pending(**p) for p in peer.pending]
 
-    def _store(self, thread: Peer, records: list[Pending]) -> None:
-        thread.pending = [dataclasses.asdict(p) for p in records]
+    def _store(self, peer: Peer, records: list[Pending]) -> None:
+        peer.pending = [dataclasses.asdict(p) for p in records]
         self.bridge.save()
 
-    def _add(self, thread: Peer, record: Pending) -> None:
-        self._store(thread, [*self.pending(thread), record])
+    def _add(self, peer: Peer, record: Pending) -> None:
+        self._store(peer, [*self.pending(peer), record])
 
-    def _update(self, thread: Peer, record: Pending) -> None:
-        self._store(thread, [record if p.token == record.token else p for p in self.pending(thread)])
+    def _update(self, peer: Peer, record: Pending) -> None:
+        self._store(peer, [record if p.token == record.token else p for p in self.pending(peer)])
 
     def find(self, token: str) -> tuple[Peer, Pending]:
-        for thread in self.bridge.peers():
-            for record in self.pending(thread):
+        for peer in self.bridge.peers():
+            for record in self.pending(peer):
                 if record.token == token:
-                    return thread, record
+                    return peer, record
         raise IpcError("unknown_target", f"no pending approval with token {token!r}")
 
     def _unresolved(self, token: str) -> tuple[Peer, Pending]:
-        thread, record = self.find(token)
+        peer, record = self.find(token)
         if record.resolved:
             raise IpcError("precondition", f"approval {token} was already resolved")
-        return thread, record
+        return peer, record
 
-    def _resolve(self, thread: Peer, record: Pending) -> None:
+    def _resolve(self, peer: Peer, record: Pending) -> None:
         record.resolved = True
-        self._update(thread, record)
+        self._update(peer, record)
 
-    def _drop(self, thread: Peer, record: Pending) -> None:
-        self._store(thread, [p for p in self.pending(thread) if p.token != record.token])
+    def _drop(self, peer: Peer, record: Pending) -> None:
+        self._store(peer, [p for p in self.pending(peer) if p.token != record.token])
 
-    def labels(self, thread: Peer) -> list[str]:
+    def labels(self, peer: Peer) -> list[str]:
         """`denied <token> <age>` / `approval <token> <age>` / `hook <token> <age>` for each
         unanswered escalation."""
         now = self.clock()
-        return [f"{p.label} {p.token} {age(now - p.since)}" for p in self.pending(thread) if not p.resolved]
+        return [f"{p.label} {p.token} {age(now - p.since)}" for p in self.pending(peer) if not p.resolved]
 
     def status_label(self, thread: ThreadState) -> str:
         """The thread's status word, or its oldest unanswered escalation."""
@@ -311,44 +310,47 @@ class Approvals:
             self._hook_waiters.pop(record.token, None)
         return {"decision": decision, "why": why, "token": record.token}
 
-    def _settle_hook(self, thread: Peer, record: Pending, decision: str, why: str | None) -> None:
+    def _settle_hook(self, peer: Peer, record: Pending, decision: str, why: str | None) -> None:
         waiter = self._hook_waiters.get(record.token)
         if waiter is None or waiter.done():
-            self._drop(thread, record)
+            self._drop(peer, record)
             raise IpcError("precondition", f"the hook that asked for {record.token} is no longer waiting")
         waiter.set_result((decision, why))
-        self._resolve(thread, record)
+        self._resolve(peer, record)
 
     async def sweep(self) -> None:
         """After each reconcile pass: retire requests nothing will re-send, and remind
         the spawner once of a request or a blocked hook that has waited long enough."""
         d = self.bridge.daemon
         now = self.clock()
-        for thread in self.bridge.peers():
-            for record in self.pending(thread):
+        for peer in self.bridge.peers():
+            for record in self.pending(peer):
                 if record.kind == "denied" or record.resolved:
                     continue
                 # A request from a connection that dropped is re-sent on the new
                 # subscription while its thread is still waiting on approval; the pass
                 # before this sweep refreshed that status, so any other status means the
-                # daemon has let the request go and no re-send is coming.
-                if record.kind == "request" and d is not None and record.epoch != d.epoch and thread.status != "approval":
-                    self._lost(thread, record)
+                # daemon has let the request go and no re-send is coming. Only a Codex
+                # thread has a daemon connection, and so only a thread has such a request.
+                lost = (record.kind == "request" and d is not None and record.epoch != d.epoch
+                        and isinstance(peer, ThreadState) and peer.status != "approval")
+                if lost:
+                    self._lost(peer, record)
                 elif not record.reminded and now - record.since >= REMIND_AFTER:
                     record.reminded = True
-                    self._update(thread, record)
+                    self._update(peer, record)
                     waited = age(now - record.since)
                     if record.kind == "hook":
-                        head = f"Still waiting: {holding(thread, record)} has blocked an action for {waited} (token {record.token}): {record.rationale}"
-                        self._notify(thread, record, head, "The tool call stays blocked until you answer.")
+                        head = f"Still waiting: {holding(peer, record)} has blocked an action for {waited} (token {record.token}): {record.rationale}"
+                        self._notify(peer, record, head, "The tool call stays blocked until you answer.")
                     else:
-                        head = f'Still waiting: the action in "{thread.name}" (token {record.token}) has been blocked for {waited}: {record.rationale}'
-                        self._notify(thread, record, head, "The turn stays blocked until you answer.")
+                        head = f'Still waiting: the action in "{peer.name}" (token {record.token}) has been blocked for {waited}: {record.rationale}'
+                        self._notify(peer, record, head, "The turn stays blocked until you answer.")
 
-    def _notify(self, thread: Peer, record: Pending, head: str, tail: str) -> None:
+    def _notify(self, peer: Peer, record: Pending, head: str, tail: str) -> None:
         cwd = f"  cwd: {record.cwd}\n" if record.cwd else ""
         text = f"{head}\n  command: {record.command}\n{cwd}{tail} {REPLY_COMMANDS.format(token=record.token)}"
-        self.bridge._spawn(self.bridge.deliver_to_spawner(thread, text), "antiphon-approval-notice")
+        self.bridge._spawn(self.bridge.deliver_to_spawner(peer, text), "antiphon-approval-notice")
 
     # --- turn end ------------------------------------------------------------------------
 
@@ -438,7 +440,7 @@ class Approvals:
         await d.respond(record.request_id, result)
         self._resolve(thread, record)
 
-    def _lost(self, thread: Peer, record: Pending) -> None:
+    def _lost(self, thread: ThreadState, record: Pending) -> None:
         """A request whose connection dropped and whose thread has since stopped waiting on
         approval: the daemon let it go, so no re-send will give it an id to answer on. The
         record is dropped, not kept resolved, and the spawner is told the turn moved on
@@ -463,23 +465,23 @@ class Approvals:
             ) from e
 
     @staticmethod
-    def _reply(thread: Peer, record: Pending) -> dict:
-        return {"token": record.token, "kind": record.kind, "name": thread.name, "command": record.command}
+    def _reply(peer: Peer, record: Pending) -> dict:
+        return {"token": record.token, "kind": record.kind, "name": peer.name, "command": record.command}
 
 
 def install(bridge: Bridge) -> Approvals:
     """Register the approval handlers and ops on a bridge; returns the handler object."""
     approvals = Approvals(bridge)
-    for thread in bridge.peers():
+    for peer in bridge.peers():
         # A request's id lives on the connection it arrived on, which died with the previous
         # bridge process; the daemon re-sends it on the new subscription while the thread is
         # still waiting, and the sweep retires it when it is not. A blocked hook lived in an
         # op of that process: nobody waits on it any more, so it is forgotten. A record an
         # older bridge wrote in a shape this one cannot read goes the same way, rather than
         # stopping this bridge from starting at all.
-        thread.pending = [record for record in thread.pending
-                          if record["kind"] != "hook" and "asker" in record]
-        for record in thread.pending:
+        peer.pending = [record for record in peer.pending
+                        if record["kind"] != "hook" and "asker" in record]
+        for record in peer.pending:
             if record["kind"] == "request":
                 record["epoch"] = None
     bridge.ops["approve"] = approvals.op_approve

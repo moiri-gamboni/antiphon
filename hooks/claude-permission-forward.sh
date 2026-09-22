@@ -24,13 +24,28 @@ exec python3 -c "$(cat <<'PY'
 import json
 import socket
 import sys
+import time
+from pathlib import Path
 
 socket_path, budget = sys.argv[1], float(sys.argv[2])
+log_path = Path(socket_path).parent / "log" / "hooks.jsonl"
+
+
+def record(direction: str, data: object) -> None:
+    """Keep the raw document beside the one the Codex direction's shim writes. A hook
+    that cannot write its log still has to answer, so a failure here is not one."""
+    try:
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"t": time.time(), "dir": direction, "boundary": "claude-hook", "data": data}) + "\n")
+    except OSError:
+        pass
 
 
 def ask(request: dict) -> dict:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.settimeout(budget + 5)
+        # Shorter than the budget the bridge is given, so a bridge that accepts the
+        # connection and then never answers still leaves time to print a decision.
+        s.settimeout(budget + 2)
         s.connect(socket_path)
         s.sendall(json.dumps(request).encode() + b"\n")
         data = b""
@@ -43,7 +58,9 @@ def ask(request: dict) -> dict:
 
 
 def decide() -> tuple[str, str | None]:
-    hook_input = json.loads(sys.stdin.read())
+    raw = sys.stdin.read()
+    record("in", raw)
+    hook_input = json.loads(raw)
     tool_input = hook_input.get("tool_input") or {}
     command = tool_input.get("command")
     reply = ask({"v": 1, "op": "hook_ask", "args": {
@@ -68,6 +85,8 @@ except Exception as e:
 out = {"hookEventName": "PreToolUse", "permissionDecision": decision}
 if decision == "deny" or why:
     out["permissionDecisionReason"] = why or "denied by the session that started this one"
-print(json.dumps({"hookSpecificOutput": out}))
+answer = {"hookSpecificOutput": out}
+record("out", answer)
+print(json.dumps(answer))
 PY
 )" "${ANTIPHON_HOME:-$HOME/.antiphon}/bridge.sock" "${1:-595}"

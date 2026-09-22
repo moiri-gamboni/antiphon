@@ -27,6 +27,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from antiphon.rawlog import RawLog
+
 log = logging.getLogger(__name__)
 
 CLAUDE = "claude"
@@ -34,8 +36,9 @@ HOOK_NAME = "claude-permission-forward.sh"
 # Claude Code's own default for a command hook, and so the budget within which a
 # forwarded permission request has to be answered.
 HOOK_TIMEOUT = 600
-# Kept back from that budget so the hook prints its answer before Claude Code's timeout.
-ASK_MARGIN = 5
+# Kept back from that budget so the hook has time to reach the bridge, give up on a
+# bridge that accepts but never answers, and still print a decision inside the timeout.
+ASK_MARGIN = 15
 
 
 class LaunchFailed(Exception):
@@ -88,29 +91,33 @@ def claude_argv(spec: Spec) -> list[str]:
     if spec.hook:
         argv += ["--settings", hook_settings(spec.hook, spec.gate)]
     if spec.prompt:
-        argv += [spec.prompt]
+        # A brief may well start with a dash; `--` keeps `claude` from reading it as a flag.
+        argv += ["--", spec.prompt]
     return argv
 
 
-async def launch(spec: Spec) -> Launched:
+async def launch(spec: Spec, rawlog: RawLog) -> Launched:
     """Start the session; it is the caller that waits for its record to appear."""
     argv = claude_argv(spec)
+    rawlog.log("out", "claude", {"argv": argv, "cwd": spec.cwd})
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=spec.cwd, stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     out, err = await proc.communicate()
     stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
-    log.info("%s -> rc %s\n%s%s", shlex.join(argv), proc.returncode, stdout, stderr)
+    rawlog.log("in", "claude", {"rc": proc.returncode, "stdout": stdout, "stderr": stderr})
     if proc.returncode != 0:
         raise LaunchFailed(f"{shlex.join(argv)} exited {proc.returncode}: {stderr.strip() or stdout.strip()}")
     return Launched(argv=argv, stdout=stdout)
 
 
-def stop(job_id: str) -> None:
+def stop(job_id: str, rawlog: RawLog) -> None:
     """End a background session. Claude Code owns the process; this asks it to end one."""
-    done = subprocess.run([CLAUDE, "stop", job_id], capture_output=True, text=True, check=False)
-    log.info("claude stop %s -> rc %s\n%s%s", job_id, done.returncode, done.stdout, done.stderr)
+    argv = [CLAUDE, "stop", job_id]
+    rawlog.log("out", "claude", {"argv": argv})
+    done = subprocess.run(argv, capture_output=True, text=True, check=False)
+    rawlog.log("in", "claude", {"rc": done.returncode, "stdout": done.stdout, "stderr": done.stderr})
 
 
 def attach_argv(job_id: str) -> list[str]:

@@ -94,8 +94,9 @@ class FakeLauncher:
         self.specs: list[launch.Spec] = []
         self.sessions: list[StandInSession] = []
 
-    async def __call__(self, spec: launch.Spec) -> launch.Launched:
+    async def __call__(self, spec: launch.Spec, rawlog) -> launch.Launched:
         self.specs.append(spec)
+        rawlog.log("out", "claude", {"argv": launch.claude_argv(spec), "cwd": spec.cwd})
         if self.fails:
             raise launch.LaunchFailed(self.fails)
         if self.register:
@@ -133,7 +134,8 @@ class Rig:
         self.human = FakeClaude(self.sessions_dir, self.sock_dir, name="claude-main")
         self.bridge = Bridge(self.home, sessions_dir=self.sessions_dir, codex_home=self.codex_home,
                              ensure_running=lambda codex_home, rawlog=None: str(self.daemon_sock),
-                             launch_claude=self.launcher, stop_claude=self.stopped.append)
+                             launch_claude=self.launcher,
+                             stop_claude=lambda job_id, rawlog: self.stopped.append(job_id))
         self.bridge.reconcile_interval = 3600
         self.bridge.reconnect_backoff = (0.05, 0.2)
         self.thread = ThreadState(thread_id=SPAWNER_THREAD, name="codex-spawner", cwd=str(short_tmp),
@@ -289,7 +291,7 @@ def test_the_name_the_session_derives_before_its_own_is_not_taken_for_it(short_t
     given lands a moment later (observed). Reading the first record would misname the peer."""
 
     class LateNamer(FakeLauncher):
-        async def __call__(self, started: launch.Spec) -> launch.Launched:
+        async def __call__(self, started: launch.Spec, rawlog) -> launch.Launched:
             self.specs.append(started)
             session = StandInSession(self.sessions_dir, self.sock_dir, "tmp-45", started.session_id,
                                      name_source="derived")
@@ -423,7 +425,6 @@ def test_wait_on_a_session_returns_when_its_idle_notice_arrives(short_tmp):
         async with Rig(short_tmp) as rig:
             await rig.start_claude()
             session = rig.launcher.sessions[0]
-            session.set_status("busy")
             waiting = asyncio.create_task(rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, rig.caller))
             subscription = (await asyncio.to_thread(session.listener.wait_for_frames, 1, 2.0))[0]
             send_frame(rig.child_sock, {
@@ -439,26 +440,30 @@ def test_wait_on_a_session_returns_when_its_idle_notice_arrives(short_tmp):
     assert result == {"status": "idle", "final": "the diff is fine", "name": "helper"}
 
 
-def test_wait_on_a_session_that_is_already_idle_returns_at_once(short_tmp):
+def test_a_wait_that_times_out_leaves_its_subscription_to_arrive_as_a_notice(short_tmp):
+    """A subscription cannot be withdrawn, so the one a timed-out wait made must be handed
+    to `notify` rather than left to arrive as a turn from nobody."""
+
     async def body():
         async with Rig(short_tmp) as rig:
             await rig.start_claude()
-            return await rig.bridge.dispatch("wait", {"target": "helper", "timeout": 30}, rig.caller)
-
-    assert run(body()) == {"status": "idle", "final": None, "name": "helper"}
-
-
-def test_wait_on_a_session_that_stays_busy_times_out(short_tmp):
-    async def body():
-        async with Rig(short_tmp) as rig:
-            await rig.start_claude()
-            rig.launcher.sessions[0].set_status("busy")
+            session = rig.launcher.sessions[0]
             with pytest.raises(IpcError) as timed_out:
                 await rig.bridge.dispatch("wait", {"target": "helper", "timeout": 0.2}, rig.caller)
-            return timed_out.value
+            subscription = (await asyncio.to_thread(session.listener.wait_for_frames, 1, 2.0))[0]
+            send_frame(rig.child_sock, {
+                "type": "control", "action": "peer_idle_notice", "orig_msg_id": subscription["msg_id"],
+                "state": "idle", "finished_at": 0, "detail": "done after all",
+                "from": f"uds:{session.sock_path}", "from_mode": "prompting",
+                "msgV": 1, "msg_id": "9d0b1a6c-0000-4000-8000-000000000004",
+            })
+            turn = await asyncio.wait_for(rig.fake.wait_request("turn/start"), 5)
+            return timed_out.value, turn["params"]["input"][0]["text"]
 
-    error = run(body())
+    error, relayed = run(body())
     assert error.kind == "timeout"
+    assert "antiphon notify" in error.message
+    assert relayed == "Peer helper is idle: done after all"
 
 
 # --- the forward hook ------------------------------------------------------------------------
@@ -610,3 +615,104 @@ def test_a_state_file_an_older_bridge_wrote_still_loads(short_tmp):
     assert list(bridge.state.threads) == ["t1"]
     assert bridge.state.sessions == {}
     assert bridge.state.threads["t1"].pending == []
+
+
+# --- what the review found -------------------------------------------------------------
+
+
+def test_wait_does_not_call_a_session_idle_before_it_has_reacted_to_the_prompt(short_tmp):
+    """A session's record still says idle for a moment after it is given work. Reporting
+    that as a finished turn would hand the caller an answer that never happened."""
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_claude(prompt="do the thing")
+            session = rig.launcher.sessions[0]
+            waiting = asyncio.create_task(rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, rig.caller))
+            subscription = (await asyncio.to_thread(session.listener.wait_for_frames, 1, 2.0))[0]
+            send_frame(rig.child_sock, {
+                "type": "control", "action": "peer_idle_notice", "orig_msg_id": subscription["msg_id"],
+                "state": "idle", "finished_at": 0, "detail": "the thing is done",
+                "from": f"uds:{session.sock_path}", "from_mode": "prompting",
+                "msgV": 1, "msg_id": "9d0b1a6c-0000-4000-8000-000000000003",
+            })
+            return await asyncio.wait_for(waiting, 5)
+
+    assert run(body()) == {"status": "idle", "final": "the thing is done", "name": "helper"}
+
+
+def test_wait_from_a_terminal_names_what_a_terminal_can_do(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_claude()
+            human = Caller(kind="human", claude_pid=None, claude_session_id=None, codex_thread=None)
+            with pytest.raises(IpcError) as refused:
+                await rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, human)
+            return refused.value
+
+    error = run(body())
+    assert error.kind == "usage"
+    assert "antiphon status" in error.message
+
+
+def test_reconcile_forgets_a_session_that_is_no_longer_running(short_tmp):
+    """Nothing else removes one: a session stopped by hand or lost to a reboot would keep
+    its name reserved and keep being reported as live."""
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            started = await rig.start_claude()
+            rig.launcher.sessions[0].close()
+            rig.launcher.sessions.clear()
+            await rig.bridge.reconcile()
+            return started, dict(rig.bridge.state.sessions)
+
+    started, sessions = run(body())
+    assert started["name"] == "helper"
+    assert sessions == {}
+
+
+def test_a_new_session_may_take_the_name_of_one_that_has_gone(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_claude()
+            rig.launcher.sessions[0].close()
+            rig.launcher.sessions.clear()
+            await rig.bridge.reconcile()
+            again = await rig.start_claude()
+            status = await rig.bridge.dispatch("status", {"target": "helper"}, rig.caller)
+            return again, status
+
+    again, status = run(body())
+    assert again["name"] == "helper"
+    assert status["session_id"] == again["session_id"]
+
+
+def test_a_prompt_that_begins_with_a_dash_is_not_read_as_a_flag():
+    argv = launch.claude_argv(spec(prompt="--no-report is not a flag here"))
+    assert argv[-2:] == ["--", "--no-report is not a flag here"]
+
+
+def test_the_spawner_is_reminded_about_a_session_that_has_waited_long_enough(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            now = [1_000_000.0]
+            rig.bridge.approvals.clock = lambda: now[0]
+            started = await rig.start_claude()
+            hooking = asyncio.create_task(
+                asyncio.to_thread(run_forward_hook, rig.home, hook_input(started["session_id"]), "30"))
+            first = await asyncio.wait_for(rig.fake.wait_request("turn/start"), 5)
+            now[0] += 600.0
+            await rig.bridge.reconcile()
+            await rig.bridge.reconcile()
+            token = rig.bridge.state.sessions[started["session_id"]].pending[0]["token"]
+            await rig.bridge.dispatch("deny", {"token": token, "why": "no"}, rig.caller)
+            await asyncio.wait_for(hooking, 15)
+            reminders = [r["params"]["input"][0]["text"] for r in rig.fake.received("turn/start")
+                         if r["params"]["input"][0]["text"].startswith("Still waiting")]
+            return first, token, reminders
+
+    first, token, reminders = run(body())
+    assert first["params"]["input"][0]["text"].startswith("Permission needed:")
+    assert len(reminders) == 1
+    assert reminders[0].startswith(f'Still waiting: the Claude Code session "helper" has blocked an action for 10m (token {token})')

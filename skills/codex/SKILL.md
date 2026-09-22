@@ -43,7 +43,7 @@ A message `Permission needed: the Claude hook <script> in "<name>" asks before a
 ```
 antiphon start --claude -C <dir> -n <name> --gate Bash -- "<brief>"
 antiphon send <name> -- <follow-up>     # arrives as an ordinary message; its reply comes back here as a turn
-antiphon wait <name>                    # returns at its next idle, with the summary
+antiphon wait <name>                    # blocks until its next idle, with the summary
 antiphon status <name>                  # directory, who started it, pending permission requests
 antiphon attach <name>                  # opens it in a terminal
 antiphon stop <name>                    # ends it; the transcript stays
@@ -51,7 +51,7 @@ antiphon stop <name>                    # ends it; the transcript stays
 
 There is no `interrupt` for a Claude Code session — Claude Code has none. Send a correction, which a busy session takes as its next message, or `antiphon stop`.
 
-`wait` returns as soon as the session is idle, so use it after sending something rather than on a session that is already sitting still.
+`wait` blocks until the session's *next* idle, so use it after sending something. On a session already sitting still it waits the whole timeout and then exits 4, leaving the subscription standing so the eventual notice reaches you as a message anyway.
 
 ### You answer its permission prompts
 

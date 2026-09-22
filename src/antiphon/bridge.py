@@ -619,9 +619,19 @@ class Bridge:
                 # (no adoption, no peer respawn, no approval reminders); log and keep going.
                 log.exception("reconcile pass failed; the next one runs on schedule")
 
+    def _forget_gone_sessions(self) -> None:
+        """Drop Claude Code sessions that are no longer running. Nothing else removes one:
+        a session ended by hand, lost to a crash or to a reboot would otherwise be reported
+        as live for ever and keep its name reserved against its own replacement."""
+        for session in [s for s in self.state.sessions.values()
+                        if registry.resolve_session(s.session_id, self.sessions_dir) is None]:
+            log.info("the Claude Code session %s is gone (session %s); forgetting it", session.name, session.session_id)
+            del self.state.sessions[session.session_id]
+
     async def reconcile(self) -> None:
         async with self._reconcile_lock:
             self._check_pins()
+            self._forget_gone_sessions()
             d = self.daemon
             if d is not None:
                 try:
@@ -1036,7 +1046,7 @@ class Bridge:
             model=args.get("model"), hook=launch_mod.forward_hook(), gate=args.get("gate"), prompt=args.get("prompt"),
         )
         try:
-            launched = await self._launch_claude(spec)
+            launched = await self._launch_claude(spec, self.rawlog)
         except launch_mod.LaunchFailed as e:
             raise IpcError("precondition", str(e)) from e
         record = await self._await_registration(spec.session_id)
@@ -1222,7 +1232,7 @@ class Bridge:
         if session.job_id is None:
             raise IpcError("precondition", f"{session.name} has no background job recorded; find it with "
                                            "`claude agents` and end it with `claude stop <id>`")
-        await asyncio.to_thread(self._stop_claude, session.job_id)
+        await asyncio.to_thread(self._stop_claude, session.job_id, self.rawlog)
         del self.state.sessions[session.session_id]
         self.save()
         log.info("stopped the Claude Code session %s (job %s)", session.name, session.job_id)

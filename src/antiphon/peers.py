@@ -90,15 +90,23 @@ class CodexSide:
         return {"name": name}
 
     async def op_wait(self, args: dict, caller: Caller) -> dict:
-        """Wait for a Claude Code session to go idle; anything else is a thread and waits
-        on its turn. A session has no turns to watch, so this is the same idle subscription
-        `notify` makes, held until the notice comes back instead of relayed into the thread."""
+        """Wait for a Claude Code session to go idle; anything else is a thread and waits on
+        its turn.
+
+        A session has no turns to watch, so this is the idle subscription `notify` makes,
+        held here instead of relayed into the thread. The notice fires at the session's
+        *next* idle, so a session that is sitting still waits the whole timeout — this is
+        for a session that has just been given something to do. There is no way to withdraw
+        a subscription, so one that outlives its wait is handed to `notify`: the notice it
+        eventually carries arrives in the thread rather than nowhere.
+        """
         session = self.bridge.started_session(args["target"])
         if session is None:
             return await self.bridge.op_wait(args, caller)
         if caller.kind != "codex":
-            raise IpcError("usage", f"{session.name} is a Claude Code session: a Claude caller waits for one with "
-                                    "SendMessage and notify_when_idle")
+            raise IpcError("usage", f"{session.name} is a Claude Code session: the wait subscribes from the caller's "
+                                    "own peer identity, which only a Codex thread has. From a Claude Code session use "
+                                    f"SendMessage with notify_when_idle; from a terminal, antiphon status {session.name}")
         record = registry.resolve_session(session.session_id, self.bridge.sessions_dir)
         if record is None:
             raise IpcError("precondition", f"{session.name} is no longer running")
@@ -110,15 +118,11 @@ class CodexSide:
         self.waits[key] = waiter
         try:
             await child.send(cmd="subscribe", to_sock=record.socket_path)
-            # An idle notice fires on the next turn end, so waiting for one on a session that
-            # is already idle would wait for a turn nobody has asked for. Read the status after
-            # subscribing, so a session that goes busy in between is still caught by the notice.
-            settled = registry.resolve_session(session.session_id, self.bridge.sessions_dir)
-            if settled is not None and settled.data.get("status") != "busy":
-                return {"status": "idle", "final": None, "name": session.name}
             state, detail = await asyncio.wait_for(waiter, timeout)
         except TimeoutError as e:
-            raise IpcError("timeout", f"{session.name} has not gone idle within {timeout:g} s") from e
+            self.watched[key] = session.name
+            raise IpcError("timeout", f"{session.name} has not gone idle within {timeout:g} s; the subscription stands, "
+                                      "so its next idle arrives here as a message, as after antiphon notify") from e
         finally:
             self.waits.pop(key, None)
         return {"status": state, "final": detail, "name": session.name}
