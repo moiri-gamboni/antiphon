@@ -20,6 +20,8 @@ REVIEW_APPROVED = load_fixture("auto-review-approved.jsonl").notifications("item
 OVERRIDE_SENT = [m for m in load_fixture("guardian-override.jsonl").sent if m.get("method") == "thread/approveGuardianDeniedAction"][0]
 REQUEST = load_fixture("user-reviewer-request-approval.jsonl").server_requests("item/commandExecution/requestApproval")[0]
 DECLINE_REQUEST = load_fixture("decline.jsonl").server_requests("item/commandExecution/requestApproval")[0]
+# thread/resume on the thread of the dropped connection: still active with waitingOnApproval.
+RESUMED_WAITING = load_fixture("dropped-connection.jsonl").result(5)
 TURN_STARTED_NOTICE = load_fixture("user-reviewer-request-approval.jsonl").notifications("turn/started")[0]
 COMPLETED_NOTICE = [n for n in load_fixture("permission-hook-order.jsonl").notifications("turn/completed") if n["turn"]["status"] == "completed"][0]
 
@@ -368,7 +370,40 @@ def test_approve_refuses_a_request_whose_turn_has_ended(short_tmp):
     assert answer is None
 
 
-def test_a_request_from_a_dropped_connection_is_retired_at_the_reconnect_interrupting_its_turn(short_tmp):
+def test_a_request_re_sent_after_a_dropped_connection_re_keys_the_one_record(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            # The thread is still waiting on approval when the bridge resubscribes.
+            rig.fake.replies["thread/resume"] = {"result": RESUMED_WAITING}
+            rig.fake.replies["turn/interrupt"] = {"result": {}}
+            await rig.start_thread(review_by_parent=True)
+            request_id, token = await blocked(rig)
+            await rig.frames(1, timeout=5.0)
+            since = rig.bridge.state.threads[THREAD_ID].pending[0]["since"]
+            old_epoch = rig.bridge.daemon.epoch
+            await rig.fake.drop()
+            await until(lambda: rig.bridge.daemon is not None and rig.bridge.daemon.epoch != old_epoch)
+            await until(lambda: rig.bridge.state.threads[THREAD_ID].status == "approval")
+            # The daemon re-sends the pending request on the new subscription, new id.
+            new_id = await rig.fake.server_request("item/commandExecution/requestApproval", for_thread(REQUEST["params"]))
+            await until(lambda: rig.bridge.state.threads[THREAD_ID].pending[0]["request_id"] == new_id)
+            rig.bridge.state.threads[THREAD_ID].active_turn_id = REQUEST["params"]["turnId"]
+            await rig.bridge.dispatch("approve", {"token": token}, rig.caller)
+            answer = await answered(rig, new_id)
+            more = await rig.frames(2, timeout=0.3)
+            return token, since, request_id, new_id, rig.bridge.state.threads[THREAD_ID].pending, answer, len(more), rig.fake.received("turn/interrupt")
+
+    token, since, request_id, new_id, pending, answer, messages, interrupts = run(body())
+    assert new_id != request_id
+    [record] = pending
+    assert record["token"] == token
+    assert record["since"] == since  # the reminder clock does not restart
+    assert answer == {"jsonrpc": "2.0", "id": new_id, "result": {"decision": "accept"}}
+    assert messages == 1  # the spawner is told once, not again on the re-send
+    assert interrupts == []
+
+
+def test_a_stale_request_whose_thread_came_back_idle_is_retired_without_an_interrupt(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
             await rig.start_thread(review_by_parent=True)
@@ -389,53 +424,12 @@ def test_a_request_from_a_dropped_connection_is_retired_at_the_reconnect_interru
             return token, err.value, rig.fake.received("turn/interrupt"), message_texts(frames), await answered(rig, request_id), [r["status"] for r in rows if r["kind"] == "codex"]
 
     token, err, interrupts, texts, answer, statuses = run(body())
-    assert [i["params"] for i in interrupts] == [{"threadId": THREAD_ID, "turnId": REQUEST["params"]["turnId"]}]
+    assert interrupts == []
     assert len(texts) == 2
-    assert f"(token {token})" in texts[1] and "lost" in texts[1] and "interrupted" in texts[1]
-    assert err.kind == "unknown_target"  # the lost record is dropped, so its token is gone
+    assert f"(token {token})" in texts[1] and "lost" in texts[1]
+    assert err.kind == "unknown_target"  # the retired record is dropped, so its token is gone
     assert answer is None
     assert not statuses[0].startswith("approval")
-
-
-def test_lost_survives_a_transport_error_during_its_interrupt(short_tmp):
-    from antiphon.codex.ws import TransportClosed
-
-    async def body():
-        async with Rig(short_tmp) as rig:
-            await rig.start_thread(review_by_parent=True)
-            request_id, token = await blocked(rig)
-            thread, record = rig.bridge.approvals.find(token)
-            thread.active_turn_id = record.turn_id
-
-            async def boom(*args, **kwargs):
-                raise TransportClosed("connection lost")
-
-            rig.bridge.daemon.turn_interrupt = boom
-            # _lost is best-effort; a transport failure interrupting the lost turn must not
-            # escape (it would end the reconcile loop that calls the sweep).
-            await rig.bridge.approvals._lost(thread, record, rig.bridge.daemon)
-            return rig.bridge.state.threads[THREAD_ID].pending
-
-    assert run(body()) == []  # completed without raising, and dropped the lost record
-
-
-def test_a_lost_request_whose_turn_already_ended_interrupts_nothing(short_tmp):
-    async def body():
-        async with Rig(short_tmp) as rig:
-            await rig.start_thread(review_by_parent=True, report=False)
-            request_id, token = await blocked(rig)
-            await rig.frames(1, timeout=5.0)
-            await rig.fake.notify("turn/completed", for_thread(COMPLETED_NOTICE))
-            old_epoch = rig.bridge.daemon.epoch
-            await rig.fake.drop()
-            await until(lambda: rig.bridge.daemon is not None and rig.bridge.daemon.epoch != old_epoch)
-            await until(lambda: not rig.bridge.state.threads[THREAD_ID].pending or rig.bridge.state.threads[THREAD_ID].pending[0]["resolved"])
-            frames = await rig.frames(2, timeout=5.0)
-            return rig.fake.received("turn/interrupt"), message_texts(frames)
-
-    interrupts, texts = run(body())
-    assert interrupts == []
-    assert len(texts) == 2 and "lost" in texts[1] and "interrupted" not in texts[1]
 
 
 def test_a_bridge_restart_makes_every_persisted_request_stale(short_tmp):

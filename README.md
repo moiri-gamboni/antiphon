@@ -86,7 +86,7 @@ The thread has continued without it. Reply with: antiphon approve a1b2c3   or   
 
 `antiphon approve a1b2c3` records the approval in the thread through Codex's own override call (`thread/approveGuardianDeniedAction`, assembled the way Codex's TUI assembles it) and tells the thread to retry; if the daemon refuses the override, the approval is delivered as a message and the thread is told to retry. `antiphon deny a1b2c3 -- <why>` tells the thread the action stays denied. Whether a retried command then runs unreviewed, is reviewed again, or is denied again on the installed Codex version has not been captured yet.
 
-`start --review-by-parent` makes the spawning session the reviewer instead: each escalation is a blocking request, forwarded as `Codex asks to run an action in "<name>" ... The turn is blocked until you answer.`; `approve` answers it `accept`, `deny` answers `decline`, which refuses the command and leaves the turn running so it can be told why. The spawner is reminded once after ten minutes; nothing is ever cancelled by waiting. A request whose daemon connection dropped can no longer be answered: the bridge ends that turn if it is still waiting and tells the spawner.
+`start --review-by-parent` makes the spawning session the reviewer instead: each escalation is a blocking request, forwarded as `Codex asks to run an action in "<name>" ... The turn is blocked until you answer.`; `approve` answers it `accept`, `deny` answers `decline`, which refuses the command and leaves the turn running so it can be told why. The spawner is reminded once after ten minutes; nothing is ever cancelled by waiting. A dropped daemon connection does not lose a request either: the daemon re-sends it when the bridge resubscribes, and the same token answers it on the new id. Only a request whose thread has stopped waiting on approval by then is retired, with a message to the spawner.
 
 `antiphon ls` shows `denied <token> <age>` or `approval <token> <age>` in place of a thread's status while an escalation is unanswered; `antiphon status <name>` lists them under `pending`. Answering an escalation is allowed to the session (or thread) that spawned the thread, to any Claude Code session, and to a human at a terminal.
 
@@ -192,7 +192,7 @@ Other things seen:
 
 - `send` exits 3 with `direct app-server input is not allowed for multi-agent v2 sub-agents`: the target is one of Codex's sub-agents; only its parent drives it.
 - `start --worktree` exits 2 with `a branch named 'codex/<name>' already exists`: a stopped thread of that name left its branch; pick another name or delete the branch.
-- `approve` exits 2 with `was lost with the Codex connection`: the blocking request belonged to a daemon connection that dropped; send the thread a new instruction.
+- `approve` exits 2 with `arrived on a Codex connection that dropped`: the daemon has not re-sent the request on the new connection yet; run the command again in a moment. If the token has gone instead, the thread stopped waiting on the approval and the spawner was told so.
 - `attach` prints `codex resume <id>` instead of opening a window: the caller is not inside tmux.
 - The bridge started by the service exits at once with `a bridge already answers`: a lazily started bridge is running; `install.sh` stops it before enabling the service, or stop it yourself and restart the service.
 

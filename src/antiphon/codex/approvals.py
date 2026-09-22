@@ -12,8 +12,11 @@ A thread started with the spawner as reviewer instead gets blocking
 `item/commandExecution/requestApproval` server requests; those are forwarded
 the same way, answered with a decision on `approve`/`deny`, and the spawner
 is reminded once when one has waited ten minutes. Waiting never cancels a
-request: `deny` is the way out. A request is retired only once it can no longer
-be answered: its connection to the daemon dropped, or its asking turn ended.
+request: `deny` is the way out. A dropped connection does not lose one either:
+the daemon re-sends a pending request on the new subscription, which re-keys
+the record to the new id under the same token. A request is retired only once
+it can no longer be answered: its asking turn ended, or its connection dropped
+and its thread came back not waiting on approval.
 
 A Claude Code hook run through `antiphon hook run` that answers `ask` is the
 third kind: the shim's `hook_ask` op records it, sends the same message, and
@@ -34,8 +37,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from antiphon.callers import Caller
-from antiphon.codex.daemon import Daemon, DaemonError
-from antiphon.codex.ws import TransportClosed
+from antiphon.codex.daemon import DaemonError
 from antiphon.ipc import IpcError
 from antiphon.state import ThreadState
 
@@ -222,10 +224,22 @@ class Approvals:
             # left blocking.
             await self.bridge.refuse_server_request(request_id, method, params)
             return
+        # The item id is unique for the life of the item, so it survives a daemon and
+        # bridge restart; the epoch:id fallback is only for a request that carries none.
+        token = token_for(params.get("itemId") or f"{self.bridge.daemon.epoch}:{request_id}")
+        already = next((p for p in self.pending(thread) if p.token == token and not p.resolved), None)
+        if already is not None:
+            # A pending request is re-sent whole on a new subscription after the connection
+            # it arrived on dropped: same item, new id. Re-keying the record rather than
+            # opening a second one keeps `since`, so the reminder clock does not restart
+            # and the spawner is not asked the same question twice.
+            already.request_id = request_id
+            already.epoch = self.bridge.daemon.epoch
+            self._update(thread, already)
+            log.info("approval request %s on %s was re-sent as id %s", token, thread.name, request_id)
+            return
         record = Pending(
-            # The item id is unique for the life of the item, so it survives a daemon and
-            # bridge restart; the epoch:id fallback is only for a request that carries none.
-            token=token_for(params.get("itemId") or f"{self.bridge.daemon.epoch}:{request_id}"), thread_id=thread.thread_id,
+            token=token, thread_id=thread.thread_id,
             turn_id=params["turnId"], command=params["command"], cwd=params["cwd"],
             rationale=params["reason"], risk_level=None, review_completed_params=None,
             since=self.clock(), resolved=False, kind="request", request_id=request_id, epoch=self.bridge.daemon.epoch,
@@ -287,7 +301,7 @@ class Approvals:
         self._resolve(thread, record)
 
     async def sweep(self) -> None:
-        """After each reconcile pass: retire requests whose connection is gone, and remind
+        """After each reconcile pass: retire requests nothing will re-send, and remind
         the spawner once of a request or a blocked hook that has waited long enough."""
         d = self.bridge.daemon
         now = self.clock()
@@ -295,8 +309,12 @@ class Approvals:
             for record in self.pending(thread):
                 if record.kind == "denied" or record.resolved:
                     continue
-                if record.kind == "request" and d is not None and record.epoch != d.epoch:
-                    await self._lost(thread, record, d)
+                # A request from a connection that dropped is re-sent on the new
+                # subscription while its thread is still waiting on approval; the pass
+                # before this sweep refreshed that status, so any other status means the
+                # daemon has let the request go and no re-send is coming.
+                if record.kind == "request" and d is not None and record.epoch != d.epoch and thread.status != "approval":
+                    await self._lost(thread, record)
                 elif not record.reminded and now - record.since >= REMIND_AFTER:
                     record.reminded = True
                     self._update(thread, record)
@@ -383,8 +401,11 @@ class Approvals:
     async def _answer(self, thread: ThreadState, record: Pending, result: dict) -> None:
         d = await self.bridge._require_daemon()
         if record.epoch != d.epoch:
-            await self._lost(thread, record, d)
-            raise IpcError("precondition", f"approval {record.token} was lost with the Codex connection")
+            # The id belongs to the connection that carried the request, which is gone.
+            # The daemon re-sends the request on the new subscription, and that re-key
+            # gives the same token an id to answer on; until then there is none.
+            raise IpcError("precondition", f"approval {record.token} arrived on a Codex connection that dropped; "
+                           "it is re-sent on the new one, so try again in a moment")
         if thread.active_turn_id != record.turn_id:
             # The asking turn is over (interrupted, say); its request id is dead, so answering
             # it would report a success that reaches nothing. Drop the stale record and refuse.
@@ -393,27 +414,17 @@ class Approvals:
         await d.respond(record.request_id, result)
         self._resolve(thread, record)
 
-    async def _lost(self, thread: ThreadState, record: Pending, d: Daemon) -> None:
-        """A request from a connection that is gone cannot be answered on this one. What
-        the daemon did with it is not captured, so a turn still waiting on it is ended
-        rather than left blocked forever, and the spawner is told either way. The record is
-        dropped, not kept resolved: nothing about a lost request can be answered later."""
+    async def _lost(self, thread: ThreadState, record: Pending) -> None:
+        """A request whose connection dropped and whose thread has since stopped waiting on
+        approval: the daemon let it go, so no re-send will give it an id to answer on. The
+        record is dropped, not kept resolved, and the spawner is told the turn moved on
+        without it. The thread's own turn is left alone: it is no longer blocked."""
         self._store(thread, [p for p in self.pending(thread) if p.token != record.token])
-        interrupted = False
-        if thread.active_turn_id == record.turn_id:
-            try:
-                await d.turn_interrupt(thread.thread_id, record.turn_id)
-                interrupted = True
-            except (DaemonError, TransportClosed, TimeoutError) as e:
-                # Best-effort: the turn may be over, or the fresh connection may flap again;
-                # either way the record is already resolved and the loop must not die here.
-                log.info("interrupt after a lost approval on %s refused (turn probably over): %r", thread.name, e)
-        outcome = "the turn was interrupted" if interrupted else "that turn is over"
         text = (
-            f'The approval request in "{thread.name}" (token {record.token}) for `{record.command}` was lost when the connection to Codex dropped; '
-            f"{outcome}. Send the thread a new instruction to try again."
+            f'The approval request in "{thread.name}" (token {record.token}) for `{record.command}` was lost when the connection to Codex dropped, '
+            "and the thread is no longer waiting on it. Send the thread a new instruction to try again."
         )
-        log.warning("approval request %s on %s lost with its connection; %s", record.token, thread.name, outcome)
+        log.warning("approval request %s lost with its connection; %s is no longer waiting on it", record.token, thread.name)
         self.bridge._spawn(self.bridge.deliver_to_spawner(thread, text), "antiphon-approval-notice")
 
     async def _tell(self, thread: ThreadState, text: str) -> None:
@@ -436,9 +447,10 @@ def install(bridge: Bridge) -> Approvals:
     """Register the approval handlers and ops on a bridge; returns the handler object."""
     approvals = Approvals(bridge)
     for thread in bridge.state.threads.values():
-        # A request lives on the connection it arrived on, which died with the previous
-        # bridge process; the sweep retires these once the daemon is back. A blocked hook
-        # lived in an op of that process: nobody waits on it any more, so it is forgotten.
+        # A request's id lives on the connection it arrived on, which died with the previous
+        # bridge process; the daemon re-sends it on the new subscription while the thread is
+        # still waiting, and the sweep retires it when it is not. A blocked hook lived in an
+        # op of that process: nobody waits on it any more, so it is forgotten.
         thread.pending = [record for record in thread.pending if record["kind"] != "hook"]
         for record in thread.pending:
             if record["kind"] == "request":
