@@ -141,7 +141,7 @@ Limits:
 
 `antiphon attach <name>` inside tmux opens a new window in the current session running `codex resume <thread id>` and prints `session:@window.%pane`; outside tmux it prints the command for you to run anywhere. `start --visible` starts a thread and attaches in one step. The thread outlives the window.
 
-The reverse holds too: a plain `codex` TUI you start is adopted by the bridge within 15 seconds (or at once, on the daemon's `thread/started` broadcast), named `codex-<directory>` unless it has a name, and listed as a peer; it is driven by messages and `interrupt` like any thread, and closing the TUI retires it. Codex sub-agents (threads with a parent) are listed under their parent, never registered as peers, and driven only by Codex's own tools.
+The reverse holds too: a plain `codex` TUI you start is adopted by the bridge within 15 seconds (or at once, on the daemon's `thread/started` broadcast), named `codex-<directory>` unless it has a name, and listed as a peer; it is driven by messages and `interrupt` like any thread, and closing the TUI retires it. The bridge subscribes to it as it does to its own threads, so its turn endings and status changes reach `antiphon ls` and `notify_when_idle` as they happen rather than at the next pass; its escalations arrive too, and the TUI keeps drawing its own approval prompt and answering them. Codex sub-agents (threads with a parent) are listed under their parent, never registered as peers, and driven only by Codex's own tools.
 
 ## Codex-side use
 

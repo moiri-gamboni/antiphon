@@ -238,6 +238,32 @@ def test_a_failed_turn_reports_the_failure_and_no_report_skips_the_message(short
     assert more == frames
 
 
+def test_a_turn_ending_on_an_adopted_thread_reaches_its_subscriber_as_an_idle_notice(short_tmp):
+    adoption = load_fixture("adoption.jsonl")
+    adopted_id = adoption.result(2)["thread"]["id"]
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            rig.fake.replies["thread/loaded/list"] = {"result": {"data": [adopted_id], "nextCursor": None}}
+            rig.fake.replies["thread/read"] = {"result": adoption.result(2)}
+            await rig.bridge.reconcile()
+            await until(lambda: rig.bridge.state.threads[adopted_id].child_pid is not None)
+            child_sock = str(rig.sock_dir / f"{rig.bridge.state.threads[adopted_id].child_pid}.sock")
+            rig.claude.replay(CAPTURED_NOTIFY, child_sock)
+            await rig.fake.notify("turn/completed", for_thread(COMPLETED_NOTICE, adopted_id))
+            frames = await rig.frames(1, timeout=5.0)
+            more = await rig.frames(2, timeout=0.3)
+            return rig.bridge.subscribed.get(adopted_id), rig.bridge.daemon.epoch, frames, more
+
+    subscribed, epoch, frames, more = run(body())
+    assert subscribed == epoch  # the notification only arrives because the bridge subscribed
+    [notice] = frames
+    assert notice["action"] == "peer_idle_notice"
+    assert notice["state"] == "idle"
+    assert notice["detail"] == "DONE"
+    assert more == frames  # a human's thread reports its answer to no spawner
+
+
 # --- approvals: the escalation reaches Claude, the CLI answers it ---------------------
 
 DENIED = load_fixture("auto-review-denied.jsonl")

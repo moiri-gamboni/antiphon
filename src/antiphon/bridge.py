@@ -626,19 +626,25 @@ class Bridge:
         for thread in list(self.state.threads.values()):
             if thread.origin == "adopted":
                 await self._refresh_adopted(d, thread, loaded)
-            elif self.subscribed.get(thread.thread_id) != d.epoch and thread.status != "unloaded":
-                await self._subscribe(d, thread)
         # A stopped thread stays loaded on the daemon until its own idle timer; it is known,
         # just not hosted, and must not be adopted back until the user resumes it.
         known = set(self.state.threads) | set(self.state.stopped.values()) | {s for t in self.state.threads.values() for s in t.sub_agents}
         unknown = [tid for tid in loaded if tid not in known]
         if unknown:
             await self._adopt(d, unknown)
+        # Subscribing after the adoption so a thread found in this pass is live in it too.
         for thread in list(self.state.threads.values()):
+            if self.subscribed.get(thread.thread_id) != d.epoch and thread.status != "unloaded":
+                await self._subscribe(d, thread)
             if thread.child_pid is None:
                 await self.ensure_peer(thread)
 
     async def _subscribe(self, d: Daemon, thread: ThreadState) -> None:
+        """Resume the thread on this connection, so its turn endings, status changes and
+        escalations arrive as notifications instead of being polled. This costs a thread a
+        human is driving from a terminal nothing: `tui-routing.jsonl` shows an escalation
+        reaching every subscribed client whichever side raised it, with the TUI still
+        drawing its own approval prompt. The bridge listens and never answers for it."""
         was_busy = thread.status in ("busy", "approval")
         try:
             result = await d.thread_resume(thread.thread_id)
@@ -669,6 +675,9 @@ class Bridge:
         self._record_turn_end(thread, turn)
 
     async def _refresh_adopted(self, d: Daemon, thread: ThreadState, loaded: set[str]) -> None:
+        """What `thread/read` tells us about an adopted thread that no notification does:
+        whether the daemon still has it loaded at all. The rest of its life arrives on the
+        subscription."""
         if thread.thread_id not in loaded:
             await self._retire(thread)
             return

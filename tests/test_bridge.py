@@ -801,17 +801,19 @@ def test_reconcile_runs_the_sweeps_even_while_the_daemon_is_down(short_tmp):
     assert run(body()) == [True]
 
 
-def test_reconcile_adopts_a_loaded_thread_absent_from_state_without_subscribing(short_tmp):
+def test_reconcile_adopts_a_loaded_thread_absent_from_state_and_subscribes_to_it(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:
             rig.fake.replies["thread/loaded/list"] = {"result": {"data": [ADOPTED_ID], "nextCursor": None}}
             await rig.bridge.reconcile()
             thread = rig.bridge.state.threads[ADOPTED_ID]
-            return thread, rig.methods()
+            resumed = [r["params"]["threadId"] for r in rig.fake.received("thread/resume")]
+            return thread, rig.methods(), resumed, dict(rig.bridge.subscribed), rig.bridge.daemon.epoch
 
-    thread, methods = run(body())
+    thread, methods, resumed, subscribed, epoch = run(body())
     assert (thread.origin, thread.spawner, thread.name, thread.cwd, thread.status) == ("adopted", "human", "codex-antiphon-capture", "~/antiphon-capture", "idle")
-    assert "thread/resume" not in methods
+    assert resumed == [ADOPTED_ID]
+    assert subscribed == {ADOPTED_ID: epoch}
     assert methods.count("thread/read") == 1
 
 
@@ -840,7 +842,7 @@ def test_reconcile_keeps_a_sub_agent_under_its_parent_and_never_resumes_it(short
     assert list(state.threads) == [SUB_AGENT_PARENT]
     sub = state.threads[SUB_AGENT_PARENT].sub_agents[SUB_AGENT_ID]
     assert (sub.nickname, sub.role) == ("Bernoulli", None)
-    assert resumes == []
+    assert resumes == [f"thread/resume:{SUB_AGENT_PARENT}"]  # the parent is subscribed, the sub-agent never
     assert [(r["name"], r["kind"], r.get("parent")) for r in rows] == [("orchestrator", "codex", None), ("Bernoulli", "codex-agent", "orchestrator")]
 
 
