@@ -9,7 +9,8 @@
 # it is installed for (all of them, or the --gate matcher). It hands the call to the
 # bridge, which puts it to the session's spawner as a message with a token and blocks
 # until `antiphon approve <token>` or `antiphon deny <token> -- <why>` answers, or the
-# argument's seconds run out (default 595, just under Claude Code's 600 s hook timeout).
+# argument's seconds run out (585 as installed, short of Claude Code's 600 s hook timeout
+# by enough to print a decision; 595 when the argument is left off).
 # The answer becomes this hook's decision: allow lets the call through, deny blocks it
 # with the reason.
 #
