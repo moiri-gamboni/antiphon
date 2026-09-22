@@ -70,7 +70,9 @@ antiphon approve a1b2c3
 antiphon deny a1b2c3 -- <why the action stays denied>
 ```
 
-`approve` records the approval in the thread and tells it to retry; `deny` tells it the action stays denied and why. Whether the retried command then runs unreviewed, is reviewed again, or is denied again on the installed Codex version has not been captured yet.
+`approve` records the approval in the thread and tells it to retry; `deny` tells it the action stays denied and why.
+
+Expect approving to work for an action the reviewer merely judged risky, and not for one it judged dangerous: it reviews the retry again, and refuses again where the risk is high, knowing you approved. Say so rather than promising the user the action will now run. When you want the decision to be yours in the first place, start the thread with `--review-by-parent`, below: there the request comes to you directly and your approval is what runs it.
 
 A thread started with `--review-by-parent` makes this session the reviewer instead: the message reads `Codex asks to run an action in "<name>"` and the turn blocks until you answer (you are reminded once after ten minutes; nothing is cancelled). `antiphon ls` shows `denied <token> <age>` or `approval <token> <age>` in the status column while an escalation is unanswered.
 
