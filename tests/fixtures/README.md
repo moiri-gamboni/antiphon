@@ -105,7 +105,11 @@ Not captured: the same with a turn in progress (whether the turn continues or di
 
 ### `tui-routing.jsonl`, `tui-routing.txt`
 
-`approvalsReviewer: "user"`: a two-phase capture on a shared thread. Phase A: a TUI initiated a command escalation in a session while a headless client was subscribed via `thread/resume`; phase B: the same thread is resumed by the TUI while the headless client starts a command escalation. Each phase's pane capture is appended to the `.txt` file. Verdict: the client-side connection receives `item/commandExecution/requestApproval` in both phases (escalation initiated by TUI or client, it reaches the subscribed client); the TUI renders the approval prompt in both phases (pane shows "•" markers and the prompt text). The bridge must subscribe to adopted threads to receive escalations; TUI-based escalations are not automatically forwarded without subscription.
+`approvalsReviewer: "user"`: two phases on two threads (`01a0c880-…` in phase A, `01a0c883-…` in phase B), each with its own pane capture appended to the `.txt` file. Phase A: a TUI raised a command escalation while a headless client was subscribed via `thread/resume`. Phase B: a TUI was attached while the headless client's own turn raised the escalation.
+
+Verdict: the subscribed client's connection receives `item/commandExecution/requestApproval` in both phases, so an escalation reaches every subscribed client whichever side raised it. In phase A the TUI pane shows its own approval prompt ("Would you like to run the following command?" with the y/p/esc choices) for the request the client also holds — the two coexist. The bridge must therefore subscribe to adopted threads to see their escalations.
+
+Not captured: what the TUI's own answer does to a request a silent second subscriber is holding. Phase A ends with the prompt still open — no answer to request id 0 and no `serverRequest/resolved` for it — and phase B's pane was captured about eight seconds before its escalation, showing "Working (4s)" rather than a prompt, while the client answered that request 2 ms after it arrived. The one `serverRequest/resolved` in the file is for the request the *client* answered, with `{"decision": "decline"}` — a second instance of the `decline.jsonl` verdict.
 
 ### `unconsumed-steer.jsonl`
 

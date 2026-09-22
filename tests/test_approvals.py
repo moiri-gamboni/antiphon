@@ -20,8 +20,16 @@ REVIEW_APPROVED = load_fixture("auto-review-approved.jsonl").notifications("item
 OVERRIDE_SENT = [m for m in load_fixture("guardian-override.jsonl").sent if m.get("method") == "thread/approveGuardianDeniedAction"][0]
 REQUEST = load_fixture("user-reviewer-request-approval.jsonl").server_requests("item/commandExecution/requestApproval")[0]
 DECLINE_REQUEST = load_fixture("decline.jsonl").server_requests("item/commandExecution/requestApproval")[0]
-# thread/resume on the thread of the dropped connection: still active with waitingOnApproval.
-RESUMED_WAITING = load_fixture("dropped-connection.jsonl").result(5)
+# The dropped-connection capture, whole: the request, the waiting status the daemon
+# broadcast with it, the same request re-sent after the reconnect, and the thread/resume
+# that answered on the new connection (activeFlags ["waitingOnApproval"], its turn still
+# inProgress).
+DROPPED = load_fixture("dropped-connection.jsonl")
+DROPPED_REQUESTS = DROPPED.server_requests("item/commandExecution/requestApproval")
+WAITING_STATUS = [n for n in DROPPED.notifications("thread/status/changed")
+                  if "waitingOnApproval" in (n["status"].get("activeFlags") or [])][0]
+RESUMED_WAITING = DROPPED.result(5)
+BLOCKED_TURN = RESUMED_WAITING["thread"]["turns"][0]
 TURN_STARTED_NOTICE = load_fixture("user-reviewer-request-approval.jsonl").notifications("turn/started")[0]
 COMPLETED_NOTICE = [n for n in load_fixture("permission-hook-order.jsonl").notifications("turn/completed") if n["turn"]["status"] == "completed"][0]
 
@@ -371,36 +379,70 @@ def test_approve_refuses_a_request_whose_turn_has_ended(short_tmp):
 
 
 def test_a_request_re_sent_after_a_dropped_connection_re_keys_the_one_record(short_tmp):
+    """Replays the dropped-connection capture: a thread waiting on approval, the connection
+    gone without an answer, and the daemon re-sending the request — under the same id it
+    used before, so it is the epoch and not the id that makes the record stale."""
+    sent, resent = DROPPED_REQUESTS
+    assert resent["id"] == sent["id"]  # the daemon reused the id on the new connection
+    assert resent["params"]["itemId"] == sent["params"]["itemId"]  # which is why the token still matches
+
     async def body():
         async with Rig(short_tmp) as rig:
-            # The thread is still waiting on approval when the bridge resubscribes.
             rig.fake.replies["thread/resume"] = {"result": RESUMED_WAITING}
-            rig.fake.replies["turn/interrupt"] = {"result": {}}
+            rig.fake.replies["thread/turns/list"] = {"result": {"data": [BLOCKED_TURN], "nextCursor": None, "backwardsCursor": None}}
             await rig.start_thread(review_by_parent=True)
-            request_id, token = await blocked(rig)
+            _, token = await blocked(rig, sent["params"])
+            await rig.fake.notify("thread/status/changed", for_thread(WAITING_STATUS))
+            await until(lambda: rig.bridge.state.threads[THREAD_ID].status == "approval")
             await rig.frames(1, timeout=5.0)
             since = rig.bridge.state.threads[THREAD_ID].pending[0]["since"]
             old_epoch = rig.bridge.daemon.epoch
             await rig.fake.drop()
             await until(lambda: rig.bridge.daemon is not None and rig.bridge.daemon.epoch != old_epoch)
-            await until(lambda: rig.bridge.state.threads[THREAD_ID].status == "approval")
-            # The daemon re-sends the pending request on the new subscription, new id.
-            new_id = await rig.fake.server_request("item/commandExecution/requestApproval", for_thread(REQUEST["params"]))
-            await until(lambda: rig.bridge.state.threads[THREAD_ID].pending[0]["request_id"] == new_id)
-            rig.bridge.state.threads[THREAD_ID].active_turn_id = REQUEST["params"]["turnId"]
-            await rig.bridge.dispatch("approve", {"token": token}, rig.caller)
+            await until(lambda: rig.bridge.subscribed.get(THREAD_ID) == rig.bridge.daemon.epoch)
+            new_id = await rig.fake.server_request("item/commandExecution/requestApproval", for_thread(resent["params"]), request_id=resent["id"])
+            await until(lambda: rig.bridge.state.threads[THREAD_ID].pending[0]["epoch"] == rig.bridge.daemon.epoch)
+            result = await rig.bridge.dispatch("approve", {"token": token}, rig.caller)
             answer = await answered(rig, new_id)
             more = await rig.frames(2, timeout=0.3)
-            return token, since, request_id, new_id, rig.bridge.state.threads[THREAD_ID].pending, answer, len(more), rig.fake.received("turn/interrupt")
+            return (token, since, new_id, rig.bridge.state.threads[THREAD_ID], answer, len(more),
+                    rig.fake.received("turn/interrupt"), result, rig.fake.received("thread/turns/list"))
 
-    token, since, request_id, new_id, pending, answer, messages, interrupts = run(body())
-    assert new_id != request_id
-    [record] = pending
+    token, since, new_id, thread, answer, messages, interrupts, result, recoveries = run(body())
+    [record] = thread.pending
     assert record["token"] == token
     assert record["since"] == since  # the reminder clock does not restart
+    # A thread waiting on approval is busy, so the resubscribe asks what became of its turn;
+    # that turn id is what _answer checks against before it will answer at all.
+    assert [r["params"]["threadId"] for r in recoveries] == [THREAD_ID]
+    assert thread.active_turn_id == BLOCKED_TURN["id"]
     assert answer == {"jsonrpc": "2.0", "id": new_id, "result": {"decision": "accept"}}
+    assert result["token"] == token
     assert messages == 1  # the spawner is told once, not again on the re-send
     assert interrupts == []
+
+
+def test_a_request_re_sent_after_its_answer_was_lost_reopens_the_one_record(short_tmp):
+    """The answer went into a socket the daemon never read, so the daemon asks again. Two
+    records under one token would be unanswerable: `find` would keep returning the
+    resolved one while the re-sent request blocked the turn for good."""
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(review_by_parent=True)
+            _, token = await blocked(rig)
+            await rig.frames(1, timeout=5.0)
+            await rig.bridge.dispatch("approve", {"token": token}, rig.caller)
+            resent = await rig.fake.server_request("item/commandExecution/requestApproval", for_thread(REQUEST["params"]))
+            await until(lambda: any(not p["resolved"] for p in rig.bridge.state.threads[THREAD_ID].pending))
+            again = await rig.bridge.dispatch("approve", {"token": token}, rig.caller)
+            return token, rig.bridge.state.threads[THREAD_ID].pending, await answered(rig, resent), again, resent
+
+    token, pending, answer, again, resent = run(body())
+    [record] = pending
+    assert record["token"] == token
+    assert again["token"] == token
+    assert answer == {"jsonrpc": "2.0", "id": resent, "result": {"decision": "accept"}}
 
 
 def test_a_stale_request_whose_thread_came_back_idle_is_retired_without_an_interrupt(short_tmp):

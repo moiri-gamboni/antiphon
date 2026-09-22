@@ -642,9 +642,10 @@ class Bridge:
     async def _subscribe(self, d: Daemon, thread: ThreadState) -> None:
         """Resume the thread on this connection, so its turn endings, status changes and
         escalations arrive as notifications instead of being polled. This costs a thread a
-        human is driving from a terminal nothing: `tui-routing.jsonl` shows an escalation
-        reaching every subscribed client whichever side raised it, with the TUI still
-        drawing its own approval prompt. The bridge listens and never answers for it."""
+        human is driving from a terminal nothing: in `tui-routing.jsonl` an escalation the
+        terminal raised reaches the subscribed client as well, and the terminal's pane still
+        shows its own approval prompt. The bridge listens and never answers for it, so the
+        prompt stays the human's to decide."""
         was_busy = thread.status in ("busy", "approval")
         try:
             result = await d.thread_resume(thread.thread_id)
@@ -675,9 +676,10 @@ class Bridge:
         self._record_turn_end(thread, turn)
 
     async def _refresh_adopted(self, d: Daemon, thread: ThreadState, loaded: set[str]) -> None:
-        """What `thread/read` tells us about an adopted thread that no notification does:
-        whether the daemon still has it loaded at all. The rest of its life arrives on the
-        subscription."""
+        """Retire an adopted thread the daemon no longer lists, and read the status of one
+        that could not be subscribed — a terminal's thread before its first turn has no
+        rollout to resume, so `thread/read` is the only thing that reports on it. Once it is
+        subscribed, its status changes arrive as notifications."""
         if thread.thread_id not in loaded:
             await self._retire(thread)
             return

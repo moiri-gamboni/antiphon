@@ -23,7 +23,8 @@ sends it (`{"id": N, "result": ...}` / `{"id": N, "error": ...}`); `None`
 leaves the request unanswered. A list is served in order, its last entry
 repeating, without being consumed (a fixture's lists can be shared). A method
 with no reply configured is answered with a `-32601` error so the client under
-test fails loudly instead of hanging. `fake.requests` holds every request
+test fails loudly instead of hanging. `server_request` takes a `request_id=` to
+replay a captured one. `fake.requests` holds every request
 message received, `fake.notifications` every client notification
 (`initialized` included), `fake.connections` every accepted connection
 (`conn.frames` has the raw frames, pongs included; `conn.stop_reading()` +
@@ -161,9 +162,12 @@ class FakeDaemon:
     async def notify(self, method: str, params) -> None:
         await self.conn.send_json({"method": method, "params": params})
 
-    async def server_request(self, method: str, params) -> int:
-        self._next_request_id += 1
-        request_id = self._next_request_id
+    async def server_request(self, method: str, params, request_id: int | None = None) -> int:
+        """Send a server request; `request_id` replays a captured one (the daemon reuses ids
+        across connections, so a re-sent request can arrive under the id it had before)."""
+        if request_id is None:
+            self._next_request_id += 1
+            request_id = self._next_request_id
         self.responses[request_id] = asyncio.get_running_loop().create_future()
         await self.conn.send_json({"method": method, "id": request_id, "params": params})
         return request_id

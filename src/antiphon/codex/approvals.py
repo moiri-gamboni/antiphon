@@ -66,6 +66,10 @@ class Pending:
     kind: str  # "denied": the reviewer's denial, nothing blocks; "request": a blocking server request; "hook": a blocked hook
     request_id: int | str | None
     epoch: int | None
+    # What the daemon offered on a blocking request. Nothing reads it since `deny` stopped
+    # choosing between `decline` and `cancel`; it is kept because dropping a field makes
+    # `Pending(**p)` raise on a state file an older bridge wrote, and there is no migration
+    # step to hang that on. Drop it with the next state-schema change.
     available_decisions: list | None
     reminded: bool = False
     hook: str | None = None  # the Claude hook script that asked, for kind "hook"
@@ -227,14 +231,18 @@ class Approvals:
         # The item id is unique for the life of the item, so it survives a daemon and
         # bridge restart; the epoch:id fallback is only for a request that carries none.
         token = token_for(params.get("itemId") or f"{self.bridge.daemon.epoch}:{request_id}")
-        already = next((p for p in self.pending(thread) if p.token == token and not p.resolved), None)
+        already = next((p for p in self.pending(thread) if p.token == token), None)
         if already is not None:
             # A pending request is re-sent whole on a new subscription after the connection
-            # it arrived on dropped: same item, new id. Re-keying the record rather than
-            # opening a second one keeps `since`, so the reminder clock does not restart
-            # and the spawner is not asked the same question twice.
+            # it arrived on dropped: same item, sometimes the same id. Re-keying the record
+            # rather than opening a second one keeps `since`, so the reminder clock does not
+            # restart and the spawner is not asked the same question twice. A record marked
+            # resolved is re-opened: answering it only wrote to a socket, and the daemon
+            # asking again is the proof that the answer never arrived. Two rows under one
+            # token would be worse than either, since `find` returns only the first.
             already.request_id = request_id
             already.epoch = self.bridge.daemon.epoch
+            already.resolved = False
             self._update(thread, already)
             log.info("approval request %s on %s was re-sent as id %s", token, thread.name, request_id)
             return
@@ -314,7 +322,7 @@ class Approvals:
                 # before this sweep refreshed that status, so any other status means the
                 # daemon has let the request go and no re-send is coming.
                 if record.kind == "request" and d is not None and record.epoch != d.epoch and thread.status != "approval":
-                    await self._lost(thread, record)
+                    self._lost(thread, record)
                 elif not record.reminded and now - record.since >= REMIND_AFTER:
                     record.reminded = True
                     self._update(thread, record)
@@ -414,7 +422,7 @@ class Approvals:
         await d.respond(record.request_id, result)
         self._resolve(thread, record)
 
-    async def _lost(self, thread: ThreadState, record: Pending) -> None:
+    def _lost(self, thread: ThreadState, record: Pending) -> None:
         """A request whose connection dropped and whose thread has since stopped waiting on
         approval: the daemon let it go, so no re-send will give it an id to answer on. The
         record is dropped, not kept resolved, and the spawner is told the turn moved on
