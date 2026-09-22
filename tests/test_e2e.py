@@ -78,6 +78,17 @@ class Rig:
                              ensure_running=lambda codex_home, rawlog=None: str(self.daemon_sock))
         self.bridge.reconnect_backoff = (0.05, 0.2)
         self.bridge.reconcile_interval = 3600
+        # A subscription is registered inside the child, where a test cannot see it. The
+        # child tells the bridge, so record that: firing a turn's end before the child
+        # holds the subscription would ask it to notify nobody.
+        self.subscriptions: list[str] = []
+        announced = self.bridge.child_events["subscribed"]
+
+        async def note_subscribed(thread_id, event):
+            self.subscriptions.append(event.get("from_sock"))
+            await announced(thread_id, event)
+
+        self.bridge.child_events["subscribed"] = note_subscribed
 
     async def __aenter__(self):
         await self.fake.start()
@@ -105,6 +116,9 @@ class Rig:
 
     def send_to_child(self, frame: dict) -> dict:
         return self.claude.replay(frame, self.child_sock())
+
+    async def subscribed_by_the_session(self, timeout: float = 5) -> None:
+        await until(lambda: self.claude.sock_path in self.subscriptions, timeout)
 
 
 def test_a_message_from_claude_starts_a_turn_with_the_prefixed_text_and_no_receipt(short_tmp):
@@ -182,6 +196,7 @@ def test_turn_completed_reports_the_final_answer_to_the_spawner_then_the_idle_no
         async with Rig(short_tmp) as rig:
             await rig.start_thread()
             rig.send_to_child(CAPTURED_NOTIFY)
+            await rig.subscribed_by_the_session()
             await asyncio.wait_for(rig.fake.wait_request("thread/name/set"), 5)
             await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, rig.caller)
             await rig.fake.notify("turn/completed", for_thread(COMPLETED_NOTICE))
@@ -226,7 +241,7 @@ def test_a_failed_turn_reports_the_failure_and_no_report_skips_the_message(short
         async with Rig(short_tmp) as rig:
             await rig.start_thread(report=False)
             rig.send_to_child(CAPTURED_NOTIFY)
-            await asyncio.sleep(0.2)
+            await rig.subscribed_by_the_session()
             await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, rig.caller)
             await rig.fake.notify("turn/completed", for_thread(FAILED_TURN))
             return await rig.frames(1, timeout=5.0), await rig.frames(2, timeout=0.5)
@@ -250,6 +265,7 @@ def test_a_turn_ending_on_an_adopted_thread_reaches_its_subscriber_as_an_idle_no
             await until(lambda: rig.bridge.state.threads[adopted_id].child_pid is not None)
             child_sock = str(rig.sock_dir / f"{rig.bridge.state.threads[adopted_id].child_pid}.sock")
             rig.claude.replay(CAPTURED_NOTIFY, child_sock)
+            await rig.subscribed_by_the_session()
             await rig.fake.notify("turn/completed", for_thread(COMPLETED_NOTICE, adopted_id))
             frames = await rig.frames(1, timeout=5.0)
             more = await rig.frames(2, timeout=0.3)
