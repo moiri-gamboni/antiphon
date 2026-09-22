@@ -105,6 +105,7 @@ class CodexSide:
         own = self._own_thread(caller)
         child = self._child_of(own, f"cannot wait for {session.name}")
         key = (own.thread_id, record.socket_path)
+        timeout = args.get("timeout") or WAIT_DEFAULT_TIMEOUT
         waiter = asyncio.get_running_loop().create_future()
         self.waits[key] = waiter
         try:
@@ -115,9 +116,9 @@ class CodexSide:
             settled = registry.resolve_session(session.session_id, self.bridge.sessions_dir)
             if settled is not None and settled.data.get("status") != "busy":
                 return {"status": "idle", "final": None, "name": session.name}
-            state, detail = await asyncio.wait_for(waiter, args.get("timeout") or WAIT_DEFAULT_TIMEOUT)
+            state, detail = await asyncio.wait_for(waiter, timeout)
         except TimeoutError as e:
-            raise IpcError("timeout", f"{session.name} has not gone idle within {args.get('timeout')} s") from e
+            raise IpcError("timeout", f"{session.name} has not gone idle within {timeout:g} s") from e
         finally:
             self.waits.pop(key, None)
         return {"status": state, "final": detail, "name": session.name}

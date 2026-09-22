@@ -13,36 +13,22 @@
 # The answer becomes this hook's decision: allow lets the call through, deny blocks it
 # with the reason.
 #
-# Anything that goes wrong here — no bridge, an unknown session, a request nobody
-# answers — denies the call and says why. A guard that fails open is not a guard.
+# Anything that goes wrong here — no bridge, an unknown session, a malformed input, a
+# request nobody answers — denies the call and says why. A guard that fails open is not a
+# guard, and Claude Code lets a tool call through when a hook exits non-zero without JSON.
+# The hook input stays on stdin, where a whole file's contents fit; an environment
+# variable does not hold one.
 set -uo pipefail
 
-budget=${1:-595}
-input=$(cat || true)
-home=${ANTIPHON_HOME:-$HOME/.antiphon}
-
-ANTIPHON_HOOK_INPUT="$input" python3 - "$home/bridge.sock" "$budget" <<'PY'
+exec python3 <(cat <<'PY'
 import json
-import os
 import socket
 import sys
 
 socket_path, budget = sys.argv[1], float(sys.argv[2])
-hook_input = json.loads(os.environ["ANTIPHON_HOOK_INPUT"])
-tool_input = hook_input.get("tool_input") or {}
-command = tool_input.get("command") if isinstance(tool_input.get("command"), str) else json.dumps(tool_input)
-request = {"v": 1, "op": "hook_ask", "args": {
-    "asker": hook_input["session_id"],
-    "tool_name": hook_input["tool_name"],
-    "command": command,
-    "cwd": hook_input.get("cwd", ""),
-    "reason": f"{hook_input['tool_name']} needs a decision",
-    "hook": "claude-permission-forward.sh",
-    "timeout": budget,
-}}
 
 
-def ask() -> dict:
+def ask(request: dict) -> dict:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(budget + 5)
         s.connect(socket_path)
@@ -56,18 +42,32 @@ def ask() -> dict:
     return json.loads(data)
 
 
-try:
-    reply = ask()
-except (OSError, ValueError) as e:
-    decision, why = "deny", f"antiphon could not put this to the session's spawner: {e!r}"
-else:
+def decide() -> tuple[str, str | None]:
+    hook_input = json.loads(sys.stdin.read())
+    tool_input = hook_input.get("tool_input") or {}
+    command = tool_input.get("command")
+    reply = ask({"v": 1, "op": "hook_ask", "args": {
+        "asker": hook_input["session_id"],
+        "tool_name": hook_input["tool_name"],
+        "command": command if isinstance(command, str) else json.dumps(tool_input),
+        "cwd": hook_input.get("cwd", ""),
+        "reason": f"{hook_input['tool_name']} needs a decision",
+        "hook": "claude-permission-forward.sh",
+        "timeout": budget,
+    }})
     if reply["ok"]:
-        decision, why = reply["result"]["decision"], reply["result"]["why"]
-    else:
-        decision, why = "deny", reply["error"]["message"]
+        return reply["result"]["decision"], reply["result"]["why"]
+    return "deny", reply["error"]["message"]
+
+
+try:
+    decision, why = decide()
+except Exception as e:
+    decision, why = "deny", f"antiphon could not put this to the session's spawner: {e!r}"
 
 out = {"hookEventName": "PreToolUse", "permissionDecision": decision}
 if decision == "deny" or why:
     out["permissionDecisionReason"] = why or "denied by the session that started this one"
 print(json.dumps({"hookSpecificOutput": out}))
 PY
+) "${ANTIPHON_HOME:-$HOME/.antiphon}/bridge.sock" "${1:-595}"

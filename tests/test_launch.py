@@ -8,6 +8,7 @@ and backed by a real process so the record is live and passes the registry pins.
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import subprocess
@@ -546,3 +547,66 @@ def test_a_call_from_a_session_antiphon_did_not_start_is_denied(short_tmp):
     out = decision_of(run(body()))
     assert out["permissionDecision"] == "deny"
     assert "antiphon hosts" in out["permissionDecisionReason"]
+
+
+def test_a_tool_input_too_large_for_an_environment_variable_still_reaches_the_bridge(short_tmp):
+    """A Write of a whole file is an ordinary tool input, and the one most worth gating."""
+    payload = json.loads(hook_input("x"))
+    payload["tool_name"] = "Write"
+    payload["tool_input"] = {"file_path": "/work/big.txt", "content": "A" * 400_000}
+
+    async def body():
+        async with Rig(short_tmp) as rig:
+            started = await rig.start_claude()
+            payload["session_id"] = started["session_id"]
+            hooking = asyncio.create_task(
+                asyncio.to_thread(run_forward_hook, rig.home, json.dumps(payload)))
+            await until(lambda: rig.bridge.state.sessions[started["session_id"]].pending)
+            record = rig.bridge.state.sessions[started["session_id"]].pending[0]
+            await rig.bridge.dispatch("deny", {"token": record["token"], "why": "too big"}, rig.caller)
+            return record, await asyncio.wait_for(hooking, 15)
+
+    record, done = run(body())
+    assert record["command"].startswith('{"file_path"')
+    assert decision_of(done)["permissionDecisionReason"] == "too big"
+
+
+def test_the_hook_denies_a_document_it_cannot_read(short_tmp):
+    """Claude Code lets a call through when a hook exits non-zero with no JSON, so an input
+    this hook cannot read has to come out as a deny rather than a crash."""
+    for payload in ("", "not json", '{"tool_name": "Bash"}'):
+        out = decision_of(run_forward_hook(short_tmp / "nowhere", payload))
+        assert out["permissionDecision"] == "deny"
+        assert "could not put this to" in out["permissionDecisionReason"]
+
+
+def test_the_hook_runs_as_the_shell_command_the_settings_carry(short_tmp):
+    """Claude Code runs a hook's `command` string through a shell, not as an argv list."""
+    settings = json.loads(launch.hook_settings(launch.forward_hook(), "Bash"))
+    [handler] = settings["hooks"]["PreToolUse"][0]["hooks"]
+    done = subprocess.run(["sh", "-c", handler["command"]], input=hook_input("nobody"),
+                          capture_output=True, text=True,
+                          env={**os.environ, "ANTIPHON_HOME": str(short_tmp / "nowhere")})
+    assert decision_of(done)["permissionDecision"] == "deny"
+
+
+def test_a_state_file_an_older_bridge_wrote_still_loads(short_tmp):
+    """The pending record's owner field was renamed; a bridge that cannot read an old record
+    forgets it rather than refusing to start at all."""
+    home = short_tmp / "antiphon"
+    (home / "log").mkdir(parents=True)
+    thread = dataclasses.asdict(ThreadState(thread_id="t1", name="helper", cwd="/work", origin="spawned",
+                                            spawner="s", read_only=False))
+    thread["pending"] = [{
+        "token": "aaaaaa", "thread_id": "t1", "turn_id": None, "command": "x", "cwd": "/work",
+        "rationale": "r", "risk_level": None, "review_completed_params": None, "since": 0.0,
+        "resolved": False, "kind": "request", "request_id": 3, "epoch": 1,
+        "available_decisions": ["accept"], "reminded": False, "hook": None,
+    }]
+    (home / "state.json").write_text(json.dumps({"v": 1, "threads": {"t1": thread}, "stopped": {}, "degraded": []}))
+
+    bridge = Bridge(home, sessions_dir=short_tmp / "sessions", codex_home=short_tmp / "codex",
+                    ensure_running=lambda codex_home, rawlog=None: str(short_tmp / "nowhere.sock"))
+    assert list(bridge.state.threads) == ["t1"]
+    assert bridge.state.sessions == {}
+    assert bridge.state.threads["t1"].pending == []

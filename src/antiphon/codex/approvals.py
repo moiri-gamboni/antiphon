@@ -464,7 +464,7 @@ class Approvals:
 
     @staticmethod
     def _reply(thread: Peer, record: Pending) -> dict:
-        return {"token": record.token, "kind": record.kind, "name": thread.name, "asker": record.asker, "command": record.command}
+        return {"token": record.token, "kind": record.kind, "name": thread.name, "command": record.command}
 
 
 def install(bridge: Bridge) -> Approvals:
