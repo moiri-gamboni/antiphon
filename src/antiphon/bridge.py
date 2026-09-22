@@ -1042,36 +1042,38 @@ class Bridge:
         cwd = args["cwd"]
         wanted = args.get("name") or f"claude-{os.path.basename(cwd.rstrip('/'))}"
         spec = launch_mod.Spec(
-            session_id=str(uuid.uuid4()), name=registry.unique_name(wanted, self.taken_names()), cwd=cwd,
+            name=registry.unique_name(wanted, self.taken_names()), cwd=cwd,
             model=args.get("model"), hook=launch_mod.forward_hook(), gate=args.get("gate"), prompt=args.get("prompt"),
         )
         try:
             launched = await self._launch_claude(spec, self.rawlog)
         except launch_mod.LaunchFailed as e:
             raise IpcError("precondition", str(e)) from e
-        record = await self._await_registration(spec.session_id)
+        record = await self._await_registration(spec.name)
         if record is None:
             # The command started something antiphon cannot address. Its output names the
             # session, so `claude agents` and `claude stop` can still reach it by hand.
             raise IpcError("precondition", f"{spec.name} did not register as a peer within "
                            f"{self.register_timeout:g} s of {shlex.join(launched.argv)}; "
                            f"it said: {launched.stdout.strip() or '(nothing)'}")
-        session = SessionState(session_id=spec.session_id, name=record.name, cwd=cwd,
+        session_id = record.data["sessionId"]
+        session = SessionState(session_id=session_id, name=record.name, cwd=cwd,
                                spawner=caller.owner_id, job_id=record.data.get("jobId"))
-        self.state.sessions[spec.session_id] = session
+        self.state.sessions[session_id] = session
         self.save()
         log.info("started the Claude Code session %s (session %s, pid %s, job %s)",
-                 record.name, spec.session_id, record.pid, session.job_id)
-        return {"name": record.name, "session_id": spec.session_id, "cwd": cwd, "pid": record.pid,
+                 record.name, session_id, record.pid, session.job_id)
+        return {"name": record.name, "session_id": session_id, "cwd": cwd, "pid": record.pid,
                 "job_id": session.job_id, "hook": spec.hook}
 
-    async def _await_registration(self, session_id: str) -> registry.Record | None:
-        """The record of the session with this id, once it carries the name the session was
-        given: the first record a session writes still has its derived name (observed)."""
+    async def _await_registration(self, name: str) -> registry.Record | None:
+        """The record of the session that took this name. A background session assigns its
+        own id and ignores the one it was asked for, so the unique name the launch was given
+        is the only handle the command and the record share; the id is read back from here."""
         deadline = time.monotonic() + self.register_timeout
         while True:
-            record = registry.resolve_session(session_id, self.sessions_dir)
-            if (record is not None and record.data.get("nameSource") != "derived") or time.monotonic() >= deadline:
+            record = registry.by_name(name, self.sessions_dir)
+            if record is not None or time.monotonic() >= deadline:
                 return record
             await asyncio.sleep(0.05)
 

@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -99,9 +100,12 @@ class FakeLauncher:
         rawlog.log("out", "claude", {"argv": launch.claude_argv(spec), "cwd": spec.cwd})
         if self.fails:
             raise launch.LaunchFailed(self.fails)
+        # `claude --bg` assigns the session its own id and takes the job id from that;
+        # only the name it was given comes back (observed live, claude-bg-session.jsonl).
+        assigned = str(uuid.uuid4())
         if self.register:
-            self.sessions.append(StandInSession(self.sessions_dir, self.sock_dir, spec.name, spec.session_id))
-        return launch.Launched(argv=launch.claude_argv(spec), stdout=f"backgrounded · {spec.session_id[:8]} · {spec.name}\n")
+            self.sessions.append(StandInSession(self.sessions_dir, self.sock_dir, spec.name, assigned))
+        return launch.Launched(argv=launch.claude_argv(spec), stdout=f"backgrounded · {assigned[:8]} · {spec.name}\n")
 
     def close(self) -> None:
         for session in self.sessions:
@@ -170,17 +174,18 @@ class Rig:
 
 
 def spec(**overrides) -> launch.Spec:
-    fields = dict(session_id="1ec2f3d4-0000-4000-8000-000000000001", name="helper", cwd="/work",
-                  model=None, hook=None, gate=None)
+    fields = dict(name="helper", cwd="/work", model=None, hook=None, gate=None)
     fields.update(overrides)
     return launch.Spec(**fields)
 
 
-def test_the_command_starts_a_background_session_under_the_given_id_and_name():
+def test_the_command_starts_a_background_session_under_the_given_name():
     argv = launch.claude_argv(spec(model="sonnet", prompt="read the diff"))
     assert argv[0] == "claude"
     assert "--bg" in argv
-    assert argv[argv.index("--session-id") + 1] == "1ec2f3d4-0000-4000-8000-000000000001"
+    # No --session-id: a background session assigns its own and ignores one it is given,
+    # so asking for an id would only invite matching the record on something it ignores.
+    assert "--session-id" not in argv
     assert argv[argv.index("--name") + 1] == "helper"
     assert argv[argv.index("--model") + 1] == "sonnet"
     assert argv[-1] == "read the diff"
@@ -225,7 +230,8 @@ def test_start_claude_records_the_spawner_and_reports_the_registered_session(sho
     assert session.spawner == SPAWNER_THREAD
     assert session.cwd == str(short_tmp)
     assert session.job_id == result["session_id"][:8]
-    assert started.session_id == result["session_id"]
+    # The id comes back from the record the session wrote, not from anything asked for.
+    assert started.name == result["name"]
     assert record is not None and record.name == "helper"
     assert result["pid"] == record.pid
 
@@ -293,7 +299,7 @@ def test_the_name_the_session_derives_before_its_own_is_not_taken_for_it(short_t
     class LateNamer(FakeLauncher):
         async def __call__(self, started: launch.Spec, rawlog) -> launch.Launched:
             self.specs.append(started)
-            session = StandInSession(self.sessions_dir, self.sock_dir, "tmp-45", started.session_id,
+            session = StandInSession(self.sessions_dir, self.sock_dir, "tmp-45", str(uuid.uuid4()),
                                      name_source="derived")
             self.sessions.append(session)
             asyncio.get_running_loop().call_later(0.2, session.rename, started.name, "peer")
@@ -486,6 +492,30 @@ def run_forward_hook(home: Path, payload: str, budget: str = "5") -> subprocess.
 def decision_of(done: subprocess.CompletedProcess) -> dict:
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout)["hookSpecificOutput"]
+
+
+def test_the_tools_a_session_answers_its_spawner_with_are_not_held(short_tmp):
+    """Holding every tool holds the session's own reply: answering a spawner costs a peer
+    listing, a tool lookup and the send itself, so a gate over all of them makes the
+    session unable to say anything without three approvals (observed live)."""
+    async def body():
+        async with Rig(short_tmp) as rig:
+            started = await rig.start_claude()
+            answers = {}
+            for tool in ("SendMessage", "ListAgents", "ToolSearch"):
+                payload = json.loads(hook_input(started["session_id"]))
+                payload["tool_name"] = tool
+                payload["tool_input"] = {"to": "codex-spawner", "message": "done"}
+                done = await asyncio.to_thread(run_forward_hook, rig.home, json.dumps(payload), "5")
+                answers[tool] = done
+            return answers, rig.bridge.state.sessions[started["session_id"]].pending
+
+    answers, pending = run(body())
+    for tool, done in answers.items():
+        # No decision at all: the session's normal permission rules apply, as if no hook ran.
+        assert done.returncode == 0, (tool, done.stderr)
+        assert done.stdout.strip() == "", (tool, done.stdout)
+    assert pending == []  # and nothing was put to the spawner
 
 
 def test_the_hook_forwards_the_call_to_the_spawner_and_returns_its_approval(short_tmp):

@@ -2,9 +2,12 @@
 
 A Claude Code session registers itself in the registry, so antiphon has no peer
 child for one and nothing to supervise: it builds the command, runs it, and then
-waits for the record the session writes under the session id it was given.
-`--session-id` is the handle throughout — a name can be taken and renamed, a
-session id cannot.
+waits for the record the session writes for itself. The **name** is the handle
+between the two. A background session assigns its own session id and takes its
+job id from that, ignoring any `--session-id` it was given (observed live: a
+session asked for one id registered under another), so the name it was given is
+the only thing the launch and the record share. The caller makes the name unique
+before launching, and reads the session's real id back out of its record.
 
 The form is `claude --bg`: a background session outlives the command that started
 it, keeps its record while it lives, and Claude Code carries its whole lifecycle
@@ -47,7 +50,6 @@ class LaunchFailed(Exception):
 
 @dataclass(frozen=True)
 class Spec:
-    session_id: str
     name: str
     cwd: str
     model: str | None
@@ -85,7 +87,7 @@ def hook_settings(hook: str, gate: str | None) -> str:
 
 def claude_argv(spec: Spec) -> list[str]:
     """The `claude` command that starts the session `spec` describes."""
-    argv = [CLAUDE, "--bg", "--session-id", spec.session_id, "--name", spec.name]
+    argv = [CLAUDE, "--bg", "--name", spec.name]
     if spec.model:
         argv += ["--model", spec.model]
     if spec.hook:
