@@ -49,6 +49,15 @@ EXIT_CODES = {
     "daemon_unreachable": 5,
 }
 
+EXIT_CODES_HELP = """exit codes:
+  0  ok
+  1  no bridge answered and none could be started, or an op failed inside the bridge
+  2  usage, precondition, unknown or stopped target, or a caller not allowed on that thread; `ping`: degraded
+  3  delivery rejected (the daemon or the receiving session refused a send, approve or deny)
+  4  timeout
+  5  Codex daemon unreachable
+  6  turn failed or interrupted (or the thread stopped or unloaded during a wait)"""
+
 
 def caller_env() -> dict:
     """What the CLI knows about its caller that the bridge cannot read from the socket."""
@@ -461,7 +470,10 @@ VERBS = {
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="antiphon", description="Codex threads as Claude Code peers, and back.")
+    parser = argparse.ArgumentParser(
+        prog="antiphon", description="Codex threads as Claude Code peers, and back.",
+        epilog=EXIT_CODES_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="verb", required=True)
     sub.add_parser("ping", help="is the bridge up, and what does it speak to")
     sub.add_parser("bridge", help="run the bridge in the foreground")

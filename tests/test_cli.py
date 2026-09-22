@@ -738,3 +738,12 @@ def test_wait_on_a_session_waits_on_its_session_id(tmp_path, capsys):
     assert cli._wait(client, "helper", 5) == 0
     assert client.calls[1] == ("wait", {"target": "1ec2f3d4-0000-4000-8000-000000000001", "timeout": 5})
     assert capsys.readouterr().out == "done\n"
+
+
+def test_help_lists_every_exit_code(capsys):
+    with pytest.raises(SystemExit) as info:
+        cli.main(["--help"])
+    out = capsys.readouterr().out
+    assert info.value.code == 0
+    listed = out.split("exit codes:", 1)[1]
+    assert [int(line.split()[0]) for line in listed.splitlines() if line.strip()] == [0, 1, 2, 3, 4, 5, 6]
