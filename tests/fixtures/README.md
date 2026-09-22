@@ -124,6 +124,12 @@ Verdict: the subscribed client's connection receives `item/commandExecution/requ
 
 Not captured: what the TUI's own answer does to a request a silent second subscriber is holding. Phase A ends with the prompt still open — no answer to request id 0 and no `serverRequest/resolved` for it — and phase B's pane was captured about eight seconds before its escalation, showing "Working (4s)" rather than a prompt, while the client answered that request 2 ms after it arrived. The one `serverRequest/resolved` in the file is for the request the *client* answered, with `{"decision": "decline"}` — a second instance of the `decline.jsonl` verdict.
 
+### `two-subscribers.jsonl`
+
+`approvalsReviewer: "user"`: two connections on one thread, each frame tagged `A/` or `B/` by the connection that saw it (`{"from": "A"|"B", "sent"|"recv": ...}`), from `slice0/antiphon-two-subs.py`. A starts the thread (subscribing itself), runs a benign turn so a rollout exists, then B resumes it (subscribing itself); A then raises a write outside the workspace and answers its own `item/commandExecution/requestApproval` with `accept`, while B only watches.
+
+What it pins, the case the bridge is in on an adopted thread it does not answer: both connections receive the `item/commandExecution/requestApproval`, and when A answers, **B receives `serverRequest/resolved` although B never answered**. So a silent second subscriber is told when someone else (a human in a terminal) answers, which is the signal the bridge listens for to clear a pending record it is holding.
+
 ### `unconsumed-steer.jsonl`
 
 `approvalsReviewer: "auto_review"`: a fixed-length `sleep 40` turn. Midway through (at ~34s), a `turn/steer` call sends a `clientUserMessageId` with new input. The first turn completes with the steered text appended to the model's output. A follow-up turn asks whether the steer was received; the model confirms via the echoed `clientUserMessageId`. Verdict: `turn/steer` succeeds (result: `{"turnId": "..."}`); the echoed `userMessage` item with `clientId: "<clientUserMessageId>"` arrives **before** `turn/completed`; the steer consumed and the instruction applies to the current turn (late-arriving steers can still land if the turn is long enough).
