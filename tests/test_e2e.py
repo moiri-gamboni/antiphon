@@ -282,10 +282,10 @@ def test_a_turn_ending_on_an_adopted_thread_reaches_its_subscriber_as_an_idle_no
 
 # --- approvals: the escalation reaches Claude, the CLI answers it ---------------------
 
-DENIED = load_fixture("auto-review-denied.jsonl")
+DENIED = load_fixture("guardian-retry-high.jsonl")
 REVIEW_STARTED = DENIED.notifications("item/autoApprovalReview/started")[0]
 REVIEW_DENIED = DENIED.notifications("item/autoApprovalReview/completed")[0]
-OVERRIDE_EVENT = [m for m in load_fixture("guardian-override.jsonl").sent if m.get("method") == "thread/approveGuardianDeniedAction"][0]["params"]["event"]
+OVERRIDE_EVENT = [m for m in DENIED.sent if m.get("method") == "thread/approveGuardianDeniedAction"][0]["params"]["event"]
 REQUEST_PARAMS = APPROVAL.server_requests("item/commandExecution/requestApproval")[0]["params"]
 DENIED_COMMAND = REVIEW_DENIED["action"]["command"]
 

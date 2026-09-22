@@ -305,10 +305,10 @@ def test_exit_codes_follow_the_error_kind(rig, capsys):
     assert rig.run("wait", "helper", "--timeout", "0.2", capsys=capsys)[0] == 4
 
 
-DENIED = load_fixture("auto-review-denied.jsonl")
+DENIED = load_fixture("guardian-retry-high.jsonl")
 REVIEW_STARTED = DENIED.notifications("item/autoApprovalReview/started")[0]
 REVIEW_DENIED = DENIED.notifications("item/autoApprovalReview/completed")[0]
-DENIED_TOKEN = "e16d64"  # sha256 of the captured reviewId, first 6 hex chars
+DENIED_TOKEN = "717a21"  # sha256 of the captured reviewId, first 6 hex chars
 
 
 def test_approve_and_deny_verbs_answer_a_denial_and_an_unknown_token_exits_2(rig, capsys):

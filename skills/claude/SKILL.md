@@ -72,7 +72,7 @@ antiphon deny a1b2c3 -- <why the action stays denied>
 
 `approve` records the approval in the thread and tells it to retry; `deny` tells it the action stays denied and why.
 
-Approving cannot rescue a denial reading `risk critical`: the reviewer reviews the retry again and refuses again, knowing you approved, because it holds critical risk to be beyond anyone's authorization. Whether approving rescues a lower-rated denial is untested. Say so rather than promising the user the action will now run. When you want the decision to be yours in the first place, start the thread with `--review-by-parent`, below: there the request comes to you directly and your approval is what runs it.
+The reviewer reviews the retry again; an explicit approval lets a `risk high` denial through, as its own policy says it should. A `critical` refusal never gets a token, because no approval can override it: it arrives as `Codex's automatic reviewer refused an action in "<name>" as critical risk: ...` with the command and directory. Tell the user; if they want it done, they run it themselves outside Codex. Never try to get it past the reviewer another way. When you want the decision to be yours in the first place, start the thread with `--review-by-parent`, below: there the request comes to you directly and your approval is what runs it.
 
 A thread started with `--review-by-parent` makes this session the reviewer instead: the message reads `Codex asks to run an action in "<name>"` and the turn blocks until you answer (you are reminded once after ten minutes; nothing is cancelled). `antiphon ls` shows `denied <token> <age>` or `approval <token> <age>` in the status column while an escalation is unanswered.
 

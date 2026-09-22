@@ -88,7 +88,18 @@ The thread has continued without it. Reply with: antiphon approve a1b2c3   or   
 
 `antiphon approve a1b2c3` records the approval in the thread through Codex's own override call (`thread/approveGuardianDeniedAction`, assembled the way Codex's TUI assembles it) then sends the thread ``I authorize you to retry this command: `<command>` ``; if the daemon refuses the override, that message alone carries the approval. `antiphon deny a1b2c3 -- <why>` tells the thread the action stays denied.
 
-**What approving a refusal can and cannot do.** The reviewer re-reviews the retry, and for an action it rates `critical` (the `risk` in the forwarded message) it refuses again whatever the approval says. Two captured retries, one after "retry that exact command now" and one after antiphon's own "I authorize you to retry this command", were both denied again, each review rating the risk `critical` and the user's authorization `high`, and the reviewer states the rule itself: "explicit authorization cannot override the critical-risk denial" (`tests/fixtures/guardian-retry.jsonl`, `guardian-retry-authorized.jsonl`). That is Codex's guardian, not antiphon, and no message from a spawner overrides it. So approving cannot rescue a `critical` denial; whether it rescues one rated lower is untested, since no lower-rated denial could be provoked. A thread whose escalations you intend to decide yourself should be started `--review-by-parent`, where there is no guardian, the request is answered directly, and the approval runs the command.
+**What approving a refusal can and cannot do.** The reviewer reviews the retry again, and its own policy decides what an explicit re-approval is worth: it "can override a denial produced by the default high-risk authorization threshold" and "cannot override a denial for an action that remains `critical`" (Codex's guardian prompt, `codex-rs/core/assets/guardian/policy_template.md`). Both halves are captured. A `high` denial (a script uploading a customer list to an untrusted host) was retried after `approve` and let through, the second review saying "the user explicitly re-approved retrying this exact command after being informed that it uploads sensitive customer data" (`tests/fixtures/guardian-retry-high.jsonl`). Two `critical` ones (uploading a credentials file) were refused again (`guardian-retry.jsonl`, `guardian-retry-authorized.jsonl`).
+
+So a `critical` denial gets no token. It arrives as a notice instead, for the user to run the action by hand if they want it:
+
+```
+Codex's automatic reviewer refused an action in "<name>" as critical risk: <reason>
+  command: <command>
+  cwd: <cwd>
+The thread has continued without it. No approval can override a critical-risk refusal, so this one has no token. If the user wants it done, they can run it themselves outside Codex, in that directory.
+```
+
+The notice goes to the first Claude Code session (or human) up the spawner chain: a Codex thread that spawned the refused one could not act on it either. A thread whose escalations you intend to decide yourself should be started `--review-by-parent`, where there is no guardian, the request is answered directly, and the approval runs the command.
 
 `start --review-by-parent` makes the spawning session the reviewer instead: each escalation is a blocking request, forwarded as `Codex asks to run an action in "<name>" ... The turn is blocked until you answer.`; `approve` answers it `accept`, `deny` answers `decline`, which refuses the command and leaves the turn running so it can be told why. The spawner is reminded once after ten minutes; nothing is ever cancelled by waiting. A dropped daemon connection does not lose a request either: the daemon re-sends it when the bridge resubscribes, and the same token answers it on the new id. Only a request whose thread has stopped waiting on approval by then is retired, with a message to the spawner.
 

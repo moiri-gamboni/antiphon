@@ -14,7 +14,7 @@ from fake_daemon import load_fixture
 REPO = Path(__file__).parent.parent
 HOOK = REPO / "hooks" / "approve-ask.sh"
 INSTALL = REPO / "install.sh"
-DENIED = load_fixture("auto-review-denied.jsonl").notifications("item/autoApprovalReview/completed")[0]
+DENIED = load_fixture("guardian-retry-high.jsonl").notifications("item/autoApprovalReview/completed")[0]
 
 
 def pending_from_capture() -> Pending:

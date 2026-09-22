@@ -30,7 +30,7 @@ It comes from that session, not from the user. Reply with `antiphon send <name> 
 
 ## Threads you start yourself
 
-`antiphon start` creates an idle thread; `-- <brief>` starts its first turn at once. Its final answer arrives here as a message when the turn ends. Follow up with `antiphon send <name> -- <text>` (steers a running turn, starts a new one when idle), `antiphon wait <name>` to block until its turn ends and print the answer, `antiphon status <name>`, `antiphon stop <name>`. Sandbox escalations that Codex's reviewer denies in a thread you started reach you as a message with a token; answer with `antiphon approve <token>` or `antiphon deny <token> -- <why>`, deciding as you would for a command of your own.
+`antiphon start` creates an idle thread; `-- <brief>` starts its first turn at once. Its final answer arrives here as a message when the turn ends. Follow up with `antiphon send <name> -- <text>` (steers a running turn, starts a new one when idle), `antiphon wait <name>` to block until its turn ends and print the answer, `antiphon status <name>`, `antiphon stop <name>`. Sandbox escalations that Codex's reviewer denies in a thread you started reach you as a message with a token; answer with `antiphon approve <token>` or `antiphon deny <token> -- <why>`, deciding as you would for a command of your own. A denial rated critical skips you: no approval can override it, so it goes to the Claude Code session above you, for its user to run by hand.
 
 You may drive, stop and answer for the threads and Claude Code sessions you started. Anything started by someone else accepts only messages from you.
 

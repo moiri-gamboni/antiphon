@@ -6,7 +6,9 @@ inside the thread; the turn never blocks. Only its denials reach us, as
 record with a short token, and one message goes to the spawner with the
 command and the two reply commands. `approve` records the override with the
 daemon the way Codex's own TUI does and tells the thread to retry; `deny`
-tells the thread why it stays denied.
+tells the thread why it stays denied. A denial rated critical is the
+exception: the reviewer's policy lets no approval override it, so it gets no
+token, only a notice that the user can run it by hand.
 
 A thread started with the spawner as reviewer instead gets blocking
 `item/commandExecution/requestApproval` server requests; those are forwarded
@@ -208,6 +210,9 @@ class Approvals:
             log.info("review %s on %s: %s", params["reviewId"], params["threadId"], params["review"]["status"])
             return
         command, cwd = describe_action(params["action"])
+        if params["review"]["riskLevel"] == "critical":
+            self._notify_critical(thread, params, command, cwd)
+            return
         record = Pending(
             token=token_for(params["reviewId"]), asker=thread.thread_id, turn_id=params["turnId"], command=command, cwd=cwd,
             rationale=params["review"]["rationale"], risk_level=params["review"]["riskLevel"],
@@ -218,6 +223,25 @@ class Approvals:
         log.warning("reviewer denied %r in %s (token %s)", record.command, thread.name, record.token)
         head = f'Codex\'s automatic reviewer denied an action in "{thread.name}" (token {record.token}): {record.rationale} (risk {record.risk_level})'
         self._notify(thread, record, head, "The thread has continued without it.")
+
+    def _notify_critical(self, thread: ThreadState, params: dict, command: str, cwd: str) -> None:
+        """The reviewer's policy lets a re-approval override a denial at the high-risk
+        threshold but never one rated critical (captured: the retry is refused again).
+        No token, then: only the user can run it, by hand. A spawning Codex thread could
+        not act on it either, so the notice goes to the first Claude session or human up
+        the spawner chain."""
+        log.warning("reviewer refused %r in %s as critical risk", command, thread.name)
+        cwd_line = f"  cwd: {cwd}\n" if cwd else ""
+        text = (
+            f'Codex\'s automatic reviewer refused an action in "{thread.name}" as critical risk: {params["review"]["rationale"]}\n'
+            f"  command: {command}\n{cwd_line}"
+            "The thread has continued without it. No approval can override a critical-risk refusal, so this one has no token. "
+            "If the user wants it done, they can run it themselves outside Codex, in that directory."
+        )
+        top = thread
+        while top.spawner in self.bridge.state.threads:
+            top = self.bridge.state.threads[top.spawner]
+        self.bridge._spawn(self.bridge.deliver_to_spawner(top, text), "antiphon-approval-notice")
 
     # --- the spawner as reviewer: blocking requests --------------------------------------
 
@@ -380,13 +404,10 @@ class Approvals:
         if record.kind == "request":
             await self._answer(thread, record, {"decision": "accept"})
             return self._reply(thread, record)
-        # The override is recorded and the thread is told to retry, but the guardian
-        # re-reviews the retry: for an action it rates critical it denies again whatever
-        # the approval says (captured, guardian-retry*.jsonl). So this path
-        # is not a reliable way to run what the guardian refused; a thread whose
-        # escalations must be approvable by the spawner should be started
-        # --review-by-parent, where there is no guardian and the request is answered
-        # directly. `approve` here does what it can and says exactly that to the spawner.
+        # The override is recorded and the thread is told to retry; the guardian reviews
+        # the retry again and, for a high-risk denial, lets the explicit re-approval
+        # through (captured, guardian-retry-high.jsonl). Critical denials never get here:
+        # no approval overrides them, so they have no token.
         d = await self.bridge.ensure_loaded(thread)
         try:
             await d.approve_guardian_denied(thread.thread_id, guardian_event(record.review_completed_params))
