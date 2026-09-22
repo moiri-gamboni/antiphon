@@ -23,10 +23,11 @@ A CALL is `METHOD [PARAMS_JSON]` or one of the pseudo-calls:
 
 Placeholders inside PARAMS_JSON are replaced before sending: `$THREAD` (the
 last thread id seen in a result or notification), `$TURN` (the last turn id),
-and `$GUARDIAN_EVENT` (the
+`$GUARDIAN_EVENT` (the
 core-shaped `GuardianAssessmentEvent` assembled from the last
 `item/autoApprovalReview/completed` notification the way the Codex TUI does
-it, for `thread/approveGuardianDeniedAction`).
+it, for `thread/approveGuardianDeniedAction`), and `$DENIED_COMMAND` (that
+review's `action.command`, for use inside a JSON string).
 
 `--respond DECISION` answers every `*/requestApproval` server request with
 `{"decision": DECISION}` as soon as it arrives; without it they stay pending.
@@ -211,6 +212,9 @@ class Client:
         text = params_json
         if "$GUARDIAN_EVENT" in text:
             text = text.replace('"$GUARDIAN_EVENT"', json.dumps(self.guardian_event()))
+        if "$DENIED_COMMAND" in text:
+            command = self.last_by_method["item/autoApprovalReview/completed"]["params"]["action"]["command"]
+            text = text.replace("$DENIED_COMMAND", json.dumps(command)[1:-1])
         text = text.replace("$THREAD", self.thread_id or "$THREAD")
         text = text.replace("$TURN", self.turn_id or "$TURN")
         return json.loads(text)

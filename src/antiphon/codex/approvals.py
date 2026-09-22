@@ -381,8 +381,8 @@ class Approvals:
             await self._answer(thread, record, {"decision": "accept"})
             return self._reply(thread, record)
         # The override is recorded and the thread is told to retry, but the guardian
-        # re-reviews the retry: for an action it judges high-risk it denies again even
-        # with the recorded re-approval (captured, guardian-retry.jsonl). So this path
+        # re-reviews the retry: for an action it rates critical it denies again whatever
+        # the approval says (captured, guardian-retry*.jsonl). So this path
         # is not a reliable way to run what the guardian refused; a thread whose
         # escalations must be approvable by the spawner should be started
         # --review-by-parent, where there is no guardian and the request is answered
