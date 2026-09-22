@@ -417,6 +417,21 @@ def test_wait_on_a_failed_turn_reports_the_failure_text(short_tmp):
     assert last_error["message"].startswith("You’ve hit your usage limit")
 
 
+def test_wait_on_a_turn_that_ended_with_no_message_reports_the_status_alone(short_tmp):
+    # A turn the daemon ends without an error message (a restart takes one with it)
+    # reads as a bare status, not a status with an empty reason hanging off a colon.
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, HUMAN)
+            turn = {**FAILED_TURN, "turn": {**FAILED_TURN["turn"], "status": "interrupted", "error": {"message": ""}}}
+            await rig.fake.notify("turn/completed", for_thread(turn))
+            await until(lambda: rig.bridge.state.threads[THREAD_ID].status == "idle")
+            return await rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, HUMAN)
+
+    assert run(body())["final"] == "interrupted"
+
+
 def test_stop_wakes_a_pending_wait(short_tmp):
     async def body():
         async with Rig(short_tmp) as rig:

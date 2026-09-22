@@ -202,8 +202,9 @@ def _outcome(turn: dict) -> tuple[str, str]:
         if not answers:
             answers = [i["text"] for i in turn.get("items", []) if i.get("type") == "agentMessage"]
         return status, "\n".join(answers)
-    error = turn.get("error") or {}
-    return status, f"{status}: {error.get('message', '')}"
+    # A daemon restart ends the turn it was running without a message of its own.
+    message = (turn.get("error") or {}).get("message") or ""
+    return status, f"{status}: {message}" if message else status
 
 
 def _git(argv: list[str], cwd: str, rawlog: RawLog) -> subprocess.CompletedProcess:
