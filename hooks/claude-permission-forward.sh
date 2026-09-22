@@ -17,10 +17,10 @@
 # request nobody answers — denies the call and says why. A guard that fails open is not a
 # guard, and Claude Code lets a tool call through when a hook exits non-zero without JSON.
 # The hook input stays on stdin, where a whole file's contents fit; an environment
-# variable does not hold one.
+# variable does not hold one, and the body goes in as an argument so no /dev/fd is needed.
 set -uo pipefail
 
-exec python3 <(cat <<'PY'
+exec python3 -c "$(cat <<'PY'
 import json
 import socket
 import sys
@@ -70,4 +70,4 @@ if decision == "deny" or why:
     out["permissionDecisionReason"] = why or "denied by the session that started this one"
 print(json.dumps({"hookSpecificOutput": out}))
 PY
-) "${ANTIPHON_HOME:-$HOME/.antiphon}/bridge.sock" "${1:-595}"
+)" "${ANTIPHON_HOME:-$HOME/.antiphon}/bridge.sock" "${1:-595}"
