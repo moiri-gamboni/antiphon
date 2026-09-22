@@ -229,7 +229,7 @@ Both run `<absolute path to antiphon> bridge`; `python -m antiphon bridge` from 
 
 ## Troubleshooting
 
-`antiphon ping` first: exit 0 prints `bridge ok · codex <version> · claude <version or none> · peers <n>`; exit 5 means the bridge is up but the Codex daemon is not answering (the bridge keeps reconnecting; `codex app-server daemon start`, and `~/.codex/app-server-daemon/app-server.stderr.log` for why it is not up); exit 2 means the bridge is degraded and prints the reasons. Exit 1 means no bridge answered and none could be started; the message quotes `~/.antiphon/log/bridge.out`.
+`antiphon ping` first: exit 0 prints `bridge ok · codex <version> · claude <version or none> · peers <n>`; exit 5 means the bridge is up but the Codex daemon is not answering (the bridge keeps reconnecting; `cd ~ && codex app-server daemon start`, and `~/.codex/app-server-daemon/app-server.stderr.log` for why it is not up); exit 2 means the bridge is degraded and prints the reasons. Exit 1 means no bridge answered and none could be started; the message quotes `~/.antiphon/log/bridge.out`.
 
 Degraded reasons come from the pins. On the Claude side a live registry record is checked for the required fields, `peerProtocol` 1, a socket path ending in `/<pid>.sock`, and a `procStart` that matches what the bridge computes for that pid; on the Codex side, a failed `initialize` or a "method not found" for `thread/loaded/list`, `turn/steer` or `thread/resume`. While a Claude-side pin fails the bridge hosts threads but registers no new peers; a Codex-side failure only marks the state and the banner. Both clear themselves once a pass finds everything in shape.
 
@@ -240,6 +240,7 @@ The probe recipe for anything else: `antiphon start -n probe`, send it a message
 Other things seen:
 
 - `send` exits 3 with `direct app-server input is not allowed for multi-agent v2 sub-agents`: the target is one of Codex's sub-agents; only its parent drives it.
+- `start` exits 2 with `failed to load configuration: No such file or directory`: the Codex daemon was started in a directory that has since been removed (a worktree, a temporary directory); it keeps its starting directory for life and cannot load its configuration without it. `cd ~ && codex app-server daemon restart`. A daemon that antiphon starts is started in your home directory.
 - `start --worktree` exits 2 with `a branch named 'codex/<name>' already exists`: a stopped thread of that name left its branch; pick another name or delete the branch.
 - `approve` exits 2 with `arrived on a Codex connection that dropped`: the daemon has not re-sent the request on the new connection yet; run the command again in a moment. If the token has gone instead, the thread stopped waiting on the approval and the spawner was told so.
 - `attach` prints `codex resume <id>` or `claude attach <job id>` instead of opening a window: the caller is not inside tmux.

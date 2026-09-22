@@ -668,6 +668,16 @@ def test_ensure_running_starts_the_daemon_when_the_socket_is_missing(tmp_path, m
     assert [c[0] for c in calls] == [["codex", "app-server", "daemon", "start"]]
 
 
+def test_ensure_running_starts_the_daemon_in_the_home_directory_not_the_callers(tmp_path, monkeypatch):
+    # The daemon keeps the directory it was started in for its whole life, and once
+    # that directory is removed every thread/start fails with "failed to load
+    # configuration: No such file or directory".
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    calls = stub_run(monkeypatch)
+    ensure_running(str(tmp_path))
+    assert calls[0][1]["cwd"] == str(tmp_path / "home")
+
+
 def test_ensure_running_starts_the_daemon_when_the_socket_refuses(tmp_path, monkeypatch):
     stale = tmp_path / "app-server-control" / "app-server-control.sock"
     stale.parent.mkdir()

@@ -83,7 +83,9 @@ def ensure_running(codex_home: str, rawlog=None) -> str:
         return path
     if rawlog:
         rawlog.log("out", "codex-cli", START_COMMAND)
-    done = subprocess.run(START_COMMAND, capture_output=True, text=True)
+    # The daemon keeps this directory as its cwd for life, and fails every thread/start
+    # once it is removed, so never hand it the caller's (a worktree, a temp dir).
+    done = subprocess.run(START_COMMAND, cwd=os.path.expanduser("~"), capture_output=True, text=True)
     if rawlog:
         rawlog.log("in", "codex-cli", {"rc": done.returncode, "stdout": done.stdout, "stderr": done.stderr})
     if done.returncode != 0:
