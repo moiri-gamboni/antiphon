@@ -228,8 +228,9 @@ class Approvals:
         """The reviewer's policy lets a re-approval override a denial at the high-risk
         threshold but never one rated critical (captured: the retry is refused again).
         No token, then: only the user can run it, by hand. A spawning Codex thread could
-        not act on it either, so the notice goes to the first Claude session or human up
-        the spawner chain."""
+        not act on it either, so the notice goes to the first Claude session up the
+        spawner chain; a chain that starts at a shell has none, and there the log and the
+        thread's own answer are all that report it."""
         log.warning("reviewer refused %r in %s as critical risk", command, thread.name)
         cwd_line = f"  cwd: {cwd}\n" if cwd else ""
         text = (
