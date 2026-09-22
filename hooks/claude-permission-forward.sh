@@ -32,6 +32,10 @@ socket_path, budget = sys.argv[1], float(sys.argv[2])
 log_path = Path(socket_path).parent / "log" / "hooks.jsonl"
 
 
+class Deferred(Exception):
+    """This hook has no opinion on the call; the session's own rules decide."""
+
+
 def record(direction: str, data: object) -> None:
     """Keep the raw document beside the one the Codex direction's shim writes. A hook
     that cannot write its log still has to answer, so a failure here is not one."""
@@ -58,10 +62,19 @@ def ask(request: dict) -> dict:
     return json.loads(data)
 
 
+# The tools a session answers its spawner with. Holding these would hold the session's
+# own reply: saying one thing back costs a peer listing, a tool lookup and the send, so
+# gating them makes a session unable to speak to the very party being asked to decide.
+# They carry no side effect of their own, so they are left to the session's normal rules.
+REPLY_TOOLS = {"SendMessage", "ListAgents", "ToolSearch"}
+
+
 def decide() -> tuple[str, str | None]:
     raw = sys.stdin.read()
     record("in", raw)
     hook_input = json.loads(raw)
+    if hook_input.get("tool_name") in REPLY_TOOLS:
+        raise Deferred
     tool_input = hook_input.get("tool_input") or {}
     command = tool_input.get("command")
     reply = ask({"v": 1, "op": "hook_ask", "args": {
@@ -80,6 +93,9 @@ def decide() -> tuple[str, str | None]:
 
 try:
     decision, why = decide()
+except Deferred:
+    # Print nothing at all: Claude Code reads that as "this hook has no opinion".
+    sys.exit(0)
 except Exception as e:
     decision, why = "deny", f"antiphon could not put this to the session's spawner: {e!r}"
 

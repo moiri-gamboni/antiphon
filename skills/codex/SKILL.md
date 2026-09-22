@@ -55,7 +55,7 @@ There is no `interrupt` for a Claude Code session — Claude Code has none. Send
 
 ### You answer its permission prompts
 
-`--gate <tools>` names the tools whose calls the session asks you about: `--gate Bash` for shell commands, `--gate 'Bash|Write|Edit'` for a list, and no `--gate` at all for every tool it uses, which is thorough and slow. Each such call arrives here as a message:
+`--gate <tools>` names the tools whose calls the session asks you about: `--gate Bash` for shell commands, `--gate 'Bash|Write|Edit'` for a list, and no `--gate` at all for every tool it uses, which is thorough and slow. The tools it answers you with are never held, so it can always reply. Each gated call arrives here as a message:
 
 ```
 Permission needed: the Claude Code session "<name>" asks before an action runs (token a1b2c3): Bash needs a decision

@@ -139,6 +139,8 @@ The tool call is blocked until you answer. Reply with: antiphon approve a1b2c3  
 
 Claude Code has no permission-request event, so the hook runs before *every* call of the tools it matches, not only the ones that would have prompted. `--gate Bash` narrows it to the shell tool; `--gate 'Bash|Write|Edit'` takes the same matcher syntax as any Claude Code hook. With no `--gate` every tool call is forwarded, which is thorough and slow.
 
+The tools a session answers you with — `SendMessage`, `ListAgents`, `ToolSearch` — are never held, whatever the gate says. Answering one message costs a peer listing, a tool lookup and the send, so holding them would leave the session unable to say anything to the very party being asked to decide.
+
 Limits:
 
 - A session you started from a terminal rather than from a Codex thread has no spawner to ask: the call still blocks and shows in `antiphon ls`; answer it from a shell before Claude Code's 600 s hook timeout, or it is denied.

@@ -473,7 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="start a Claude Code session instead of a Codex thread; it runs in the background, "
                             "takes send/wait/stop/attach like a thread, and has no interrupt")
     start.add_argument("--gate", help="with --claude: the tool names whose calls the session asks you about "
-                                      "(default: every tool)")
+                                      "(default: every tool it uses, bar the ones it answers you with)")
     start.add_argument("--read-only", action="store_true")
     start.add_argument("-m", "--model")
     start.add_argument("--effort")
