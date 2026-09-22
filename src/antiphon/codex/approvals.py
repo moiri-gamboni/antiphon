@@ -394,10 +394,7 @@ class Approvals:
             # The override's payload shape is pinned only for a captured `command` action;
             # when the daemon refuses it, the approval still reaches the thread as an instruction.
             log.warning("override refused for %s (%s); approving by message instead: %r", record.token, thread.name, e)
-            retry = f"I approve running `{record.command}` in `{record.cwd}`: retry it now."
-        else:
-            retry = f"The action `{record.command}` that the reviewer denied is now approved: retry it now."
-        await self._tell(thread, retry)
+        await self._tell(thread, f"I authorize you to retry this command: `{record.command}`")
         self._resolve(thread, record)
         return self._reply(thread, record)
 

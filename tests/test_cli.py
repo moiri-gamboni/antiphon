@@ -326,7 +326,7 @@ def test_approve_and_deny_verbs_answer_a_denial_and_an_unknown_token_exits_2(rig
     code, out, err = rig.run("approve", DENIED_TOKEN, capsys=capsys)
     assert (code, out) == (0, f"approved {DENIED_TOKEN} on helper: {REVIEW_DENIED['action']['command']}\n")
     assert rig.daemon.wait_request("thread/approveGuardianDeniedAction")["params"]["threadId"] == THREAD_ID
-    assert "retry it now" in rig.daemon.wait_request("turn/start")["params"]["input"][0]["text"]
+    assert "I authorize you to retry this command" in rig.daemon.wait_request("turn/start")["params"]["input"][0]["text"]
     code, out, err = rig.run("deny", DENIED_TOKEN, "--", "already", "done", capsys=capsys)
     assert code == 2 and "already resolved" in err
 

@@ -316,7 +316,7 @@ def test_a_denied_review_reaches_claude_and_cli_approve_records_the_override_the
     assert code == 0
     assert override == {"threadId": THREAD_ID, "event": OVERRIDE_EVENT}
     assert json.dumps(override["event"]) == json.dumps(OVERRIDE_EVENT)
-    assert "retry it now" in retry and DENIED_COMMAND in retry
+    assert retry == f"I authorize you to retry this command: `{DENIED_COMMAND}`"
 
 
 def test_a_blocking_request_reaches_claude_and_cli_approve_answers_accept(short_tmp, monkeypatch):

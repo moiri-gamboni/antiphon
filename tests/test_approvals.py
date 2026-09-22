@@ -112,7 +112,7 @@ def test_approve_sends_the_pinned_override_event_then_tells_the_thread_to_retry(
     result, override, turn_start, resolved = run(body())
     assert override["params"]["threadId"] == THREAD_ID
     assert json.dumps(override["params"]["event"]) == json.dumps(OVERRIDE_SENT["params"]["event"])
-    assert turn_start["params"]["input"] == [{"type": "text", "text": f"The action `{COMMAND}` that the reviewer denied is now approved: retry it now."}]
+    assert turn_start["params"]["input"] == [{"type": "text", "text": f"I authorize you to retry this command: `{COMMAND}`"}]
     assert result["token"] == DENIED_TOKEN
     assert result["name"] == "helper"
     assert resolved is True
@@ -677,7 +677,7 @@ def test_approve_falls_back_to_a_message_when_the_daemon_rejects_the_override(sh
 
     token, sent, resolved = run(body())
     assert token == DENIED_TOKEN
-    assert sent == [{"type": "text", "text": f"I approve running `{COMMAND}` in `/tmp/codex-steer-test`: retry it now."}]
+    assert sent == [{"type": "text", "text": f"I authorize you to retry this command: `{COMMAND}`"}]
     assert resolved is True
 
 
