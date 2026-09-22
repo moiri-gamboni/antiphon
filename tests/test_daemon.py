@@ -15,6 +15,7 @@ APPROVAL = load_fixture("user-reviewer-request-approval.jsonl")
 SUB_AGENT = load_fixture("sub-agent.jsonl")
 ADOPTION = load_fixture("adoption.jsonl")
 TURNS_LIST = load_fixture("turns-list.jsonl")
+FRESH_THREAD = load_fixture("fresh-thread.jsonl")
 GUARDIAN = load_fixture("guardian-override.jsonl")
 
 THREAD_ID = THREAD_START.result(2)["thread"]["id"]
@@ -364,6 +365,9 @@ COMPLETED_TURN = TURNS_LIST.result(3)["data"][0]
 NOT_LOADED = TURNS_LIST.error(4)  # "thread not loaded: <id>"
 NOT_FOUND = SUB_AGENT.error(5)  # "thread not found: <id>" from turn/start on an unloaded thread
 NO_ROLLOUT = ADOPTION.error(3)  # thread/resume on a thread that never took a turn
+# thread/turns/list on a thread created moments earlier, whose first turn has not run:
+# the sibling wording of NO_ROLLOUT, observed live before the capture below was taken.
+NO_TURNS_YET = FRESH_THREAD.error(12)
 # turn/steer answers {"turnId": ...} in the protocol schema; no capture of a
 # successful steer exists yet, so this reply is schema-shaped rather than recorded.
 STEERED = {"turnId": TURN_ID}
@@ -541,6 +545,19 @@ def test_deliver_starts_a_turn_on_an_idle_thread(tmp_path):
     assert started["input"] == [{"type": "text", "text": "carry on"}]
     assert started["clientUserMessageId"] == delivery.client_id
     assert rungs == []
+
+
+def test_deliver_starts_the_first_turn_of_a_thread_that_has_none_yet(tmp_path):
+    # A thread created by thread/start has no rollout file until its first turn, and
+    # asking for its turns fails. It plainly has no turn in progress, so the delivery
+    # is a plain start: this is the path every freshly started thread takes.
+    delivery, methods, rungs, _ = deliver_with(tmp_path, {
+        "thread/turns/list": {"error": NO_TURNS_YET},
+        "turn/start": {"result": TURN_STARTED},
+    })
+    assert delivery.kind == "started"
+    assert methods == ["thread/turns/list", "turn/start"]
+    assert [r["rung"] for r in rungs] == ["no-turns-yet"]
 
 
 def test_deliver_steers_an_active_turn(tmp_path):

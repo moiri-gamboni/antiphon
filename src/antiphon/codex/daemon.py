@@ -323,11 +323,17 @@ async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | N
     try:
         turn_id = await d.active_turn(thread_id)
     except DaemonError as e:
-        if not _is_not_loaded(e):
+        if _has_no_rollout(e):
+            # No rollout means no turn has ever run, so there is nothing to steer and
+            # nothing to resume either: the thread is loaded, it is simply new.
+            d.note("codex.deliver", {"rung": "no-turns-yet", "threadId": thread_id, "error": e.error})
+            turn_id = None
+        elif _is_not_loaded(e):
+            d.note("codex.deliver", {"rung": "not-loaded", "threadId": thread_id, "error": e.error})
+            await d.thread_resume(thread_id)
+            turn_id = await d.active_turn(thread_id)
+        else:
             raise
-        d.note("codex.deliver", {"rung": "not-loaded", "threadId": thread_id, "error": e.error})
-        await d.thread_resume(thread_id)
-        turn_id = await d.active_turn(thread_id)
     if turn_id is not None:
         try:
             result = await d.turn_steer(thread_id, turn_id, text, client_id)
@@ -359,6 +365,15 @@ def _is_not_loaded(e: DaemonError) -> bool:
     # sub-agent thread; whether a top-level thread gets the same text is unobserved.
     message = e.error.get("message", "")
     return message.startswith("thread not loaded") or message.startswith("thread not found")
+
+
+def _has_no_rollout(e: DaemonError) -> bool:
+    # A thread's rollout file is written with its first turn, so between thread/start
+    # and that turn the daemon has no history to answer from. Captured wordings:
+    # "invalid paginated history lineage for <id>: missing source rollout" from
+    # thread/turns/list, and "no rollout found for thread id <id>" from thread/resume.
+    message = e.error.get("message", "")
+    return "missing source rollout" in message or "no rollout found" in message
 
 
 def _is_turn_active(e: DaemonError) -> bool:
