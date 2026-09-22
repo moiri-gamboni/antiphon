@@ -23,6 +23,11 @@ Prepare a scratch repository (`mkdir ~/antiphon-scratch && git -C ~/antiphon-scr
 | 13 | a Codex terminal someone else started | it is adopted and listed within one reconcile pass |
 | 14 | `antiphon stop` each thread | the peers disappear from the listing and leave no registry record or socket behind |
 
+| 15 | from a Codex thread: `antiphon start --claude -n <name> -m <model> -C <dir>` | a background Claude session registers under that name within ten seconds, with the Codex thread as its spawner |
+| 16 | `antiphon send <session>` from that thread, asking for a reply | the message arrives in the session and its reply reaches the Codex thread as a turn, with nothing held |
+| 17 | the same session runs a gated tool | the call is held, the request reaches the Codex thread with a token, and `antiphon approve <token>` lets it through |
+| 18 | `antiphon stop <session>` | Claude Code ends the job and the record disappears |
+
 ## The run of 2026-09-22
 
 Codex 0.155.1, Claude Code 2.1.278. Every step above behaved as described. Three defects surfaced and were fixed in the same session:
@@ -31,4 +36,10 @@ Codex 0.155.1, Claude Code 2.1.278. Every step above behaved as described. Three
 - **An attached terminal opened in the caller's directory**, so Codex asked which directory to resume in and asked the human to trust one nobody meant to open.
 - **A turn ended by a daemon restart read as `interrupted: `**, a status with an empty reason after the colon, because such a turn carries no message of its own.
 
-Two things the run could not cover: the Codex hook shim end to end, which needs a hook written into the Codex configuration, and a macOS machine.
+The reverse direction was verified the same way later the same day, and found three more:
+
+- **A started session was reported as never registering, while it was in fact running.** A background session assigns its own session id and takes its job id from that, ignoring the one it is given, so waiting for a record under the id we chose could only ever time out. The name is the handle; the id is read back from the record. The stand-in launcher in the suite honoured the id it was given, which is exactly why the suite was quiet about it.
+- **A session could not answer its spawner.** Holding every tool held the reply too: one answer costs a peer listing, a tool lookup and the send, so it took three approvals to say one word back. Those three tools are now never held.
+- **A session inherits the default model**, which on a login without credit for it fails every turn while the session still registers and looks healthy. Pass `-m` when the default is not certain.
+
+Two things neither run could cover: the Codex hook shim end to end, which needs a hook written into the Codex configuration, and a macOS machine.
