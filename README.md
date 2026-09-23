@@ -252,6 +252,7 @@ Other things seen:
 
 - `send` exits 3 with `direct app-server input is not allowed for multi-agent v2 sub-agents`: the target is one of Codex's sub-agents; only its parent drives it.
 - `start` exits 2 with `failed to load configuration: No such file or directory`: the Codex daemon was started in a directory that has since been removed (a worktree, a temporary directory); it keeps its starting directory for life and cannot load its configuration without it. `cd ~ && codex app-server daemon restart`. A daemon that antiphon starts is started in your home directory.
+- Turns fail with an expired-token error (`token_expired`), or begin failing after a ChatGPT plan change: log in again (`codex login`, or `codex login --device-auth` on a machine without a browser), then `cd ~ && codex app-server daemon restart`, since a running daemon keeps the token it started with.
 - `start --worktree` exits 2 with `a branch named 'codex/<name>' already exists`: a stopped thread of that name left its branch; pick another name or delete the branch.
 - `approve` exits 2 with `arrived on a Codex connection that dropped`: the daemon has not re-sent the request on the new connection yet; run the command again in a moment. If the token has gone instead, the thread stopped waiting on the approval and the spawner was told so.
 - `attach` prints `codex resume <id>` or `claude attach <job id>` instead of opening a window: the caller is not inside tmux.
