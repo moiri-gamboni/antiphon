@@ -238,6 +238,5 @@ Not captured: `config/batchWrite` (the daemon-side write of `hooks.state.<key>.t
 ## Not yet captured
 
 - `mac/`: registry record, process-start line and socket directory from a macOS Claude Code install (optional).
-- What a retried command does after a guardian override: not capturable with a harmless payload, for the reason under `guardian-override.jsonl`.
 - What a terminal's own answer does to a request a silent second subscriber also holds (see `tui-routing.jsonl`).
 - A hook actually run by Codex through the shim, and `config/batchWrite` on a real daemon (see `hooks-list.jsonl`).
