@@ -7,7 +7,8 @@ antiphon makes Claude Code sessions and Codex CLI sessions peers of each other o
 - `src/antiphon/` — the package, standard library only at runtime. `bridge.py` (the one bridge process: daemon connection, thread table, reconcile, peer children, the driving ops), `cli.py` (every verb, the exit codes, lazy bridge start), `ipc.py` (control socket), `state.py` (`~/.antiphon/state.json`), `callers.py` (who is calling, by process ancestry, and the ownership rule), `peers.py` (the Codex-side verbs), `rawlog.py`.
   - `codex/` — the app-server adapter: `ws.py` (WebSocket over the daemon's Unix socket), `daemon.py` (JSON-RPC client, thread verbs, the `deliver` ladder), `approvals.py` (escalations forwarded to the spawner and answered by token, including a Claude hook's `ask`), `hooks.py` (Claude Code hook scripts as Codex hooks: the `antiphon hook run` shim's field mapping, the `hooks.json` editing, the `hooks/list` and trust-write ops).
   - `claude/` — the peer-protocol adapter: `registry.py` (session records, pins), `peer.py` (the child process that is one Codex thread's peer identity), `launch.py` (the `claude --bg` command for a session a caller owns, and where the permission-forward hook is found).
-- `skills/claude/`, `skills/codex/` — the two skills `install.sh` symlinks into place; `hooks/` — `approve-ask.sh`, the optional approval prompt hook (also the test subject for the Codex hook shim), and `claude-permission-forward.sh`, which `start --claude` installs into the session it starts (packaged into the wheel beside `claude/launch.py`, so it exists wherever antiphon is installed); `contrib/` — the systemd unit and launchd plist.
+- `skills/claude/`, `skills/codex/` — the two skills `install.sh` symlinks into place. They carry the working pattern and the rules a session needs before it acts; flags, defaults and exit codes belong in the argparse help in `cli.py`, which the skills point to.
+- `hooks/` — `approve-ask.sh`, the optional approval prompt hook (also the test subject for the Codex hook shim), and `claude-permission-forward.sh`, which `start --claude` installs into the session it starts (the wheel packages it beside `claude/launch.py`). `contrib/` — the systemd unit and launchd plist.
 - `tests/` — pytest; `tests/fake_daemon.py` and `tests/fake_claude.py` stand in for the two real sides; `tests/fixtures/` holds the scrubbed protocol captures, each described in `tests/fixtures/README.md`.
 
 ## Commands
@@ -16,6 +17,8 @@ antiphon makes Claude Code sessions and Codex CLI sessions peers of each other o
 uv run pytest -q -W error      # the whole suite; every test runs in temporary homes and never touches the user's Codex, Claude or antiphon state
 ./install.sh install            # skills + background service; --no-service, --human-approvals; ./install.sh uninstall reverses it
 ```
+
+An installed `antiphon` is a copy: after a change, `uv tool install --reinstall .`, then restart the bridge (`systemctl --user restart antiphon`, or kill the `antiphon bridge` process and let the next command start one), since a running bridge keeps the old code. Threads survive in the Codex daemon.
 
 ## Conventions
 
