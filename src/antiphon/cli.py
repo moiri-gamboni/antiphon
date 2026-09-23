@@ -475,43 +475,51 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=EXIT_CODES_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="verb", required=True)
-    sub.add_parser("ping", help="is the bridge up, and what does it speak to")
+    sub.add_parser("ping", help="is the bridge up, and what does it speak to "
+                                "(exit 0 ok, 2 degraded with the reasons, 5 Codex daemon unreachable)")
     sub.add_parser("bridge", help="run the bridge in the foreground")
 
     start = sub.add_parser("start", help="start a Codex thread (idle until sent to, unless a prompt follows --)")
     start.add_argument("-C", dest="cwd", default=os.getcwd(), help="working directory (default: the current one)")
-    start.add_argument("-n", "--name")
+    start.add_argument("-n", "--name",
+                       help="the name peers address it by (default: codex-<directory name>, "
+                            "claude-<directory name> with --claude)")
     start.add_argument("--claude", action="store_true",
                        help="start a Claude Code session instead of a Codex thread; it runs in the background, "
                             "takes send/wait/stop/attach like a thread, and has no interrupt")
     start.add_argument("--gate", help="with --claude: the tool names whose calls the session asks you about "
                                       "(default: every tool it uses, bar the ones it answers you with)")
-    start.add_argument("--read-only", action="store_true")
-    start.add_argument("-m", "--model")
-    start.add_argument("--effort")
+    start.add_argument("--read-only", action="store_true",
+                       help="Codex's read-only sandbox, for review and analysis (default: workspace-write, which "
+                            "writes under the directory and /tmp, reads what your user can, and has network access)")
+    start.add_argument("-m", "--model", help="the model (default: the Codex or Claude Code default)")
+    start.add_argument("--effort", help="the thread's reasoning effort")
     start.add_argument("--no-report", action="store_true", help="do not deliver the final answer to the spawner at turn end")
-    start.add_argument("--worktree", action="store_true", help="give the thread its own git worktree beside the repository")
+    start.add_argument("--worktree", action="store_true",
+                       help="give the thread its own git worktree beside the repository, on branch codex/<name>")
     start.add_argument("--review-by-parent", action="store_true", help="escalations block until the spawner answers")
     start.add_argument("--visible", action="store_true", help="then attach a terminal to it (see attach)")
-    start.add_argument("--wait", action="store_true")
-    start.add_argument("--timeout", type=float)
+    start.add_argument("--wait", action="store_true", help="wait for the prompt's turn and print its final answer (see wait)")
+    start.add_argument("--timeout", type=float, help=f"seconds --wait waits (default: {WAIT_DEFAULT_TIMEOUT:g})")
     start.add_argument("prompt", nargs="*", help="the first turn's prompt; put options (--wait, --timeout) before the --")
 
     send = sub.add_parser("send", help="steer a busy thread or start a turn on an idle one")
     send.add_argument("target")
-    send.add_argument("--wait", action="store_true")
-    send.add_argument("--timeout", type=float)
+    send.add_argument("--wait", action="store_true", help="wait for the turn and print its final answer (see wait)")
+    send.add_argument("--timeout", type=float, help=f"seconds --wait waits (default: {WAIT_DEFAULT_TIMEOUT:g})")
     send.add_argument("text", nargs="+", help="the message; put options (--wait, --timeout) before the --")
 
     wait = sub.add_parser("wait", help="wait for the thread's turn, or a Claude Code session's next idle, and print the outcome")
     wait.add_argument("target")
-    wait.add_argument("--timeout", type=float)
+    wait.add_argument("--timeout", type=float,
+                      help=f"seconds to wait (default: {WAIT_DEFAULT_TIMEOUT:g}); at the timeout it exits 4 and the turn goes on")
 
     sub.add_parser("interrupt", help="end the thread's current turn (Claude Code sessions have no such surface)").add_argument("target")
     sub.add_parser("status", help="a thread's state, or the bridge's").add_argument("target", nargs="?")
     sub.add_parser("ls", help="every peer on this machine")
-    sub.add_parser("stop", help="retire the thread as a peer, or end a Claude Code session started here (transcripts stay)").add_argument("target")
-    sub.add_parser("resume", help="host a stopped or never-hosted thread again").add_argument("target")
+    sub.add_parser("stop", help="retire the thread as a peer, or end a Claude Code session started here (transcripts stay; "
+                                "a clean --worktree checkout is removed, a dirty one and the branch are kept)").add_argument("target")
+    sub.add_parser("resume", help="host a stopped or never-hosted thread again, with its context and former name").add_argument("target")
     name = sub.add_parser("name", help="rename a thread (from inside a Codex thread, the thread itself when no target is given)")
     name.add_argument("target", nargs="?")
     name.add_argument("new")
