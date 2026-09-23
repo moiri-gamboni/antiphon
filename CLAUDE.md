@@ -9,7 +9,7 @@ antiphon makes Claude Code sessions and Codex CLI sessions peers of each other o
   - `claude/` — the peer-protocol adapter: `registry.py` (session records, pins), `peer.py` (the child process that is one Codex thread's peer identity), `launch.py` (the `claude --bg` command for a session a caller owns, and where the permission-forward hook is found).
 - `skills/claude/`, `skills/codex/` — the two skills `install.sh` symlinks into place. They carry the working pattern and the rules a session needs before it acts; flags, defaults and exit codes belong in the argparse help in `cli.py`, which the skills point to.
 - `hooks/` — `approve-ask.sh`, the optional approval prompt hook (also the test subject for the Codex hook shim), and `claude-permission-forward.sh`, which `start --claude` installs into the session it starts (the wheel packages it beside `claude/launch.py`). `contrib/` — the systemd unit and launchd plist.
-- `tests/` — pytest; `tests/fake_daemon.py` and `tests/fake_claude.py` stand in for the two real sides; `tests/fixtures/` holds the scrubbed protocol captures, each described in `tests/fixtures/README.md`.
+- `tests/` — pytest; `tests/fake_daemon.py` and `tests/fake_claude.py` stand in for the two real sides; `tests/fixtures/` holds the scrubbed protocol captures, each described in `tests/fixtures/README.md`, and in `scripts/` the drivers behind some of them.
 
 ## Commands
 

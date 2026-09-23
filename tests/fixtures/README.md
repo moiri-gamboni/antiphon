@@ -1,6 +1,6 @@
 # Protocol captures
 
-Every file here is a raw exchange with a real Codex app-server daemon or a real Claude Code session, recorded with `capture_daemon.py` (Codex side) or the peer stub used for the Claude side, then passed through `scrub.py`. Tests replay these; nothing in them is typed from memory.
+Every file here is a raw exchange with a real Codex app-server daemon or a real Claude Code session, recorded with `capture_daemon.py` (Codex side) or the peer stub used for the Claude side, then passed through `scrub.py`. Tests replay these; nothing in them is typed from memory. `scripts/` holds the scripts that drove some of the runs, named where their capture is described.
 
 **Codex CLI version: `codex-cli 0.155.1`** (`codex update` ran before the captures and reported 0.155.1 as the latest, so nothing changed; the captures are valid for that version only). Claude Code version in the peer captures: 2.1.278 (`version` in the registry record).
 
@@ -53,7 +53,7 @@ The second turn of that run failed with `error{codexErrorInfo: "usageLimitExceed
 
 ### `hook-allow.jsonl`, `hook-deny.jsonl`
 
-The same hook answering a decision instead of staying silent, one escalation each (a write outside the workspace), driven by `slice0/hook-modes.sh`:
+The same hook answering a decision instead of staying silent, one escalation each (a write outside the workspace), driven by `scripts/hook-modes.sh`:
 
 ```
 capture_daemon.py --listen 5 \
@@ -83,7 +83,7 @@ What the retried command does after the override is captured in `guardian-retry.
 
 ### `guardian-retry.jsonl`
 
-A credentials-shaped file of random synthetic values (`curl --data @<file>` to a host that does not resolve, so nothing can leave the machine and the values never enter the frames) provokes a genuine guardian denial, then the override and a retry, from `slice0/guardian-retry-realistic.sh`:
+A credentials-shaped file of random synthetic values (`curl --data @<file>` to a host that does not resolve, so nothing can leave the machine and the values never enter the frames) provokes a genuine guardian denial, then the override and a retry, from `scripts/guardian-retry-realistic.sh`:
 
 ```
 capture_daemon.py --listen 5 \
@@ -101,7 +101,7 @@ The same run with the retry worded as `antiphon approve` words it, ``I authorize
 
 ### `guardian-retry-high.jsonl`
 
-The same run for a denial rated `high` rather than `critical`, from `slice0/guardian-retry-high.sh`: the user asks only to run `./sync.sh`, a script that uploads a CSV of synthetic customer records (random names, emails, phone numbers; nothing real) to the same non-resolving host, so the user has authorized the script but not that payload to that destination. What it pins: the first review is `denied`, `riskLevel: "high"`, `userAuthorization: "low"` ("the user authorized running the script but did not specifically authorize sending this sensitive payload there"); after the override and ``I authorize you to retry this command: `/bin/bash -lc ./sync.sh` `` the second review is **`approved`**, `userAuthorization: "high"` ("The user explicitly re-approved retrying this exact command after being informed that it uploads sensitive customer data to an untrusted external destination"), the command runs and curl fails to resolve the host. This is the guardian policy's post-denial rule applied as written: a re-approval overrides the high-risk threshold, never a `critical` rating. The tests use this denial as the ordinary, approvable case and its sent override event as the pin for the override payload.
+The same run for a denial rated `high` rather than `critical`, from `scripts/guardian-retry-high.sh`: the user asks only to run `./sync.sh`, a script that uploads a CSV of synthetic customer records (random names, emails, phone numbers; nothing real) to the same non-resolving host, so the user has authorized the script but not that payload to that destination. What it pins: the first review is `denied`, `riskLevel: "high"`, `userAuthorization: "low"` ("the user authorized running the script but did not specifically authorize sending this sensitive payload there"); after the override and ``I authorize you to retry this command: `/bin/bash -lc ./sync.sh` `` the second review is **`approved`**, `userAuthorization: "high"` ("The user explicitly re-approved retrying this exact command after being informed that it uploads sensitive customer data to an untrusted external destination"), the command runs and curl fails to resolve the host. This is the guardian policy's post-denial rule applied as written: a re-approval overrides the high-risk threshold, never a `critical` rating. The tests use this denial as the ordinary, approvable case and its sent override event as the pin for the override payload.
 
 The earlier `guardian-override.jsonl` still pins that the override call is accepted and injects a developer note without starting a turn; a decoy of obvious dummy values, by contrast, is inspected and **approved** rather than denied (`rationale`: "the payload is verified dummy data"), which is why the denial has to come from a payload the reviewer cannot clear.
 
@@ -150,13 +150,13 @@ Not captured: what the TUI's own answer does to a request a silent second subscr
 
 ### `turn-on-a-busy-thread.jsonl`
 
-A long turn (`sleep 45`) started, then a second `turn/start` sent on the same thread twelve seconds in, carrying an instruction the first turn had no reason to follow ("end your reply with the word BANANA"), from `slice0/turn-active-text.sh`.
+A long turn (`sleep 45`) started, then a second `turn/start` sent on the same thread twelve seconds in, carrying an instruction the first turn had no reason to follow ("end your reply with the word BANANA"), from `scripts/turn-active-text.sh`.
 
-What it pins: the daemon **does not refuse a `turn/start` while a turn is running**, and does not start a second turn. It answers with the turn already in progress (the same `turn.id` the first call returned) and puts the text into it: the transcript shows the second `userMessage` item mid-turn and the final answer is "SLEPT BANANA". So a second start behaves as a steer, and the race where a turn begins between reading a thread's status and acting on it costs a message nothing. An earlier run of the same shape (`slice0/turn-active.jsonl`) confirms the no-error half separately, by interrupting instead of waiting. There is accordingly no "turn already active" error: the delivery ladder's rung for one was removed, having been built on an invented message.
+What it pins: the daemon **does not refuse a `turn/start` while a turn is running**, and does not start a second turn. It answers with the turn already in progress (the same `turn.id` the first call returned) and puts the text into it: the transcript shows the second `userMessage` item mid-turn and the final answer is "SLEPT BANANA". So a second start behaves as a steer, and the race where a turn begins between reading a thread's status and acting on it costs a message nothing. An earlier run of the same shape (`turn-active.jsonl`: `sleep 60`, the second `turn/start` twelve seconds in, then `turn/interrupt`) confirms the no-error half separately, by interrupting instead of waiting. There is accordingly no "turn already active" error: the delivery ladder's rung for one was removed, having been built on an invented message.
 
 ### `two-subscribers.jsonl`
 
-`approvalsReviewer: "user"`: two connections on one thread, each frame tagged `A/` or `B/` by the connection that saw it (`{"from": "A"|"B", "sent"|"recv": ...}`), from `slice0/antiphon-two-subs.py`. A starts the thread (subscribing itself), runs a benign turn so a rollout exists, then B resumes it (subscribing itself); A then raises a write outside the workspace and answers its own `item/commandExecution/requestApproval` with `accept`, while B only watches.
+`approvalsReviewer: "user"`: two connections on one thread, each frame tagged `A/` or `B/` by the connection that saw it (`{"from": "A"|"B", "sent"|"recv": ...}`), from `scripts/antiphon-two-subs.py`. A starts the thread (subscribing itself), runs a benign turn so a rollout exists, then B resumes it (subscribing itself); A then raises a write outside the workspace and answers its own `item/commandExecution/requestApproval` with `accept`, while B only watches.
 
 What it pins, the case the bridge is in on an adopted thread it does not answer: both connections receive the `item/commandExecution/requestApproval`, and when A answers, **B receives `serverRequest/resolved` although B never answered**. So a silent second subscriber is told when someone else (a human in a terminal) answers, which is the signal the bridge listens for to clear a pending record it is holding.
 
