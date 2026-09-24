@@ -59,6 +59,9 @@ class ThreadState:
     effort: str | None = None
     effort_sent: bool = False  # the effort dial goes on the first turn the bridge starts, whichever daemon connection that is
     worktree: str | None = None
+    # The developer instructions thread/start sent, sent again whenever the daemon rebuilds
+    # the thread from its rollout; None for a thread antiphon did not start.
+    instructions: str | None = None
     outcome: str | None = None  # the last turn's status: "completed" | "failed" | "interrupted"
     final: str | None = None  # the last turn's outcome text: its final answer or "<status>: <error>"
     sub_agents: dict[str, SubAgent] = field(default_factory=dict)

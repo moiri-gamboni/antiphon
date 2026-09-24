@@ -13,6 +13,7 @@ import pytest
 from antiphon import ipc
 from antiphon.bridge import AlreadyRunning, Bridge
 from antiphon.callers import Caller
+from antiphon.codex.daemon import HEADLESS_INSTRUCTIONS
 from fake_claude import FakeClaude, captured_frames, send_frame
 from fake_daemon import FakeDaemon, load_fixture
 
@@ -146,6 +147,15 @@ def test_start_creates_a_named_thread_records_the_spawner_and_answers_with_it(sh
     assert thread.effort == "high"
     assert thread.child_pid is None
     assert json.loads((short_tmp / "antiphon" / "state.json").read_text())["threads"][THREAD_ID]["name"] == "helper"
+
+
+def test_start_keeps_the_instructions_it_sent_in_the_state_file(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            return json.loads((rig.home / "state.json").read_text())
+
+    assert run(body())["threads"][THREAD_ID]["instructions"] == HEADLESS_INSTRUCTIONS
 
 
 def test_start_dedupes_the_name_against_hosted_threads(short_tmp):
@@ -553,6 +563,9 @@ def test_daemon_reconnect_resubscribes_every_hosted_thread_on_a_new_epoch(short_
     async def body():
         async with Rig(short_tmp) as rig:
             await rig.start_thread()
+            # Only the connection dropped: the daemon still has the thread loaded, so the
+            # resume rejoins it and carries no instructions for the daemon to ignore.
+            rig.fake.replies["thread/loaded/list"] = {"result": {"data": [THREAD_ID], "nextCursor": None}}
             first_epoch = rig.bridge.daemon.epoch
             await rig.fake.drop()
             await until(lambda: rig.bridge.daemon is not None and rig.bridge.daemon.epoch > first_epoch)
@@ -564,6 +577,20 @@ def test_daemon_reconnect_resubscribes_every_hosted_thread_on_a_new_epoch(short_
     assert resume_params == {"threadId": THREAD_ID}
     assert ping["daemon"] is True
     assert connections == 2
+
+
+def test_after_a_daemon_restart_the_resume_carries_the_threads_instructions(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            first_epoch = rig.bridge.daemon.epoch
+            # A restarted daemon lists nothing loaded: the resume rebuilds the thread from its rollout.
+            await rig.fake.drop()
+            await until(lambda: rig.bridge.daemon is not None and rig.bridge.daemon.epoch > first_epoch)
+            await until(lambda: len(rig.fake.received("thread/resume")) == 1)
+            return rig.fake.received("thread/resume")[0]["params"]
+
+    assert run(body()) == {"threadId": THREAD_ID, "developerInstructions": HEADLESS_INSTRUCTIONS}
 
 
 def test_a_raising_sweep_does_not_kill_the_reconcile_loop(short_tmp):
@@ -892,6 +919,18 @@ def test_own_thread_closed_is_unloaded_and_the_next_send_resumes_first(short_tmp
     resumes_before, methods = run(body())
     assert resumes_before == 0
     assert methods[-3:] == ["thread/resume", "thread/turns/list", "turn/start"]
+
+
+def test_an_unloaded_thread_is_resumed_with_the_instructions_it_was_started_with(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            await rig.fake.notify("thread/closed", {"threadId": THREAD_ID})
+            await until(lambda: rig.bridge.state.threads[THREAD_ID].status == "unloaded")
+            await rig.bridge.dispatch("send", {"target": "helper", "text": "again"}, HUMAN)
+            return rig.fake.received("thread/resume")[-1]["params"]
+
+    assert run(body()) == {"threadId": THREAD_ID, "developerInstructions": HEADLESS_INSTRUCTIONS}
 
 
 def test_adopted_thread_closed_is_removed(short_tmp):

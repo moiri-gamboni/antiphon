@@ -194,8 +194,19 @@ class Daemon:
             log.warning("thread/name/set for %s failed after start: %r", result["thread"]["id"], e)
         return result
 
-    async def thread_resume(self, thread_id: str) -> dict:
-        return await self.request("thread/resume", {"threadId": thread_id})
+    async def thread_resume(self, thread_id: str, instructions: str | None = None) -> dict:
+        """Load or rejoin the thread. `instructions` is for a thread the daemon no longer has
+        loaded. Rebuilding one from its rollout replays the developer message thread/start
+        recorded, but the rebuilt session takes its developer instructions from this request
+        (or the Codex config), and a compaction re-injects the session's copy rather than the
+        recorded message, so a resume without them loses them at the thread's next compaction.
+        A loaded thread keeps its own: there the daemon ignores the parameter, or, with no one
+        subscribed, reloads the thread to apply it, so it is not sent. Read from the Codex
+        source; the parameter itself is schema-derived, as no capture holds a resume carrying it."""
+        params = {"threadId": thread_id}
+        if instructions is not None:
+            params["developerInstructions"] = instructions
+        return await self.request("thread/resume", params)
 
     async def thread_read(self, thread_id: str) -> dict:
         return await self.request("thread/read", {"threadId": thread_id})
@@ -314,8 +325,10 @@ class Daemon:
                         pass
 
 
-async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | None, effort: str | None = None) -> Delivery:
+async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | None, effort: str | None = None,
+                  instructions: str | None = None) -> Delivery:
     """Get `text` into the thread: steer the active turn, or start a new one (with `effort`).
+    A thread found unloaded is resumed with `instructions` (see `Daemon.thread_resume`).
 
     The daemon unloads idle threads and turns end between a status read and the
     call that acts on it, so each of those races is handled once; anything else
@@ -334,7 +347,7 @@ async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | N
             turn_id = None
         elif _is_not_loaded(e):
             d.note("codex.deliver", {"rung": "not-loaded", "threadId": thread_id, "error": e.error})
-            await d.thread_resume(thread_id)
+            await d.thread_resume(thread_id, instructions)
             turn_id = await d.active_turn(thread_id)
         else:
             raise
@@ -349,7 +362,7 @@ async def deliver(d: Daemon, thread_id: str, text: str, sandbox_policy: dict | N
     except DaemonError as e:
         if _is_not_loaded(e):
             d.note("codex.deliver", {"rung": "not-loaded", "threadId": thread_id, "error": e.error})
-            await d.thread_resume(thread_id)
+            await d.thread_resume(thread_id, instructions)
             result = await d.turn_start(thread_id, text, sandbox_policy, client_id, effort)
         else:
             raise

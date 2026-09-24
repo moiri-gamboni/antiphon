@@ -165,6 +165,8 @@ def test_ping_exits_5_while_the_daemon_is_down_and_recovers_after_a_reconnect(ri
 
 def test_bridge_reconnects_after_the_daemon_drops_the_connection(rig, capsys):
     assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), capsys=capsys)[0] == 0
+    # The daemon itself stays up and keeps the thread loaded, so the resume only rejoins it.
+    rig.daemon.replies["thread/loaded/list"] = {"result": {"data": [THREAD_ID], "nextCursor": None}}
     rig.daemon.drop()
     resume = rig.daemon.wait_request("thread/resume", timeout=10)
     assert resume["params"] == {"threadId": THREAD_ID}

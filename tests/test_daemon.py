@@ -425,6 +425,19 @@ def test_thread_start_read_only_model_and_parent_review_map_to_their_parameters(
     assert params["approvalsReviewer"] == "user"
 
 
+def test_thread_resume_carries_instructions_only_when_given(tmp_path):
+    resume = load_fixture("daemon-restart.jsonl")
+
+    async def body():
+        async with Harness(tmp_path) as h:
+            h.fake.replies["thread/resume"] = {"result": resume.result(2)}
+            await h.daemon.thread_resume(THREAD_ID)
+            await h.daemon.thread_resume(THREAD_ID, "custom")
+            return [r["params"] for r in h.fake.received("thread/resume")]
+
+    assert run(body()) == [{"threadId": THREAD_ID}, {"threadId": THREAD_ID, "developerInstructions": "custom"}]
+
+
 def test_turn_start_sends_the_effort_only_when_given(tmp_path):
     async def body():
         async with Harness(tmp_path) as h:
@@ -593,6 +606,22 @@ def test_deliver_resumes_a_thread_the_daemon_has_not_loaded_then_retries_once(tm
     assert delivery.kind == "started"
     assert methods == ["thread/turns/list", "thread/resume", "thread/turns/list", "turn/start"]
     assert [r["rung"] for r in rungs] == ["not-loaded"]
+
+
+def test_deliver_resumes_an_unloaded_thread_with_the_instructions_it_was_given(tmp_path):
+    resume = load_fixture("daemon-restart.jsonl")
+
+    async def body():
+        async with Harness(tmp_path) as h:
+            h.fake.replies.update({
+                "thread/turns/list": [{"error": NOT_LOADED}, turns_list(COMPLETED_TURN)],
+                "thread/resume": {"result": resume.result(2)},
+                "turn/start": {"result": TURN_STARTED},
+            })
+            await deliver(h.daemon, THREAD_ID, "carry on", None, instructions="custom")
+            return h.fake.received("thread/resume")[0]["params"]
+
+    assert run(body()) == {"threadId": THREAD_ID, "developerInstructions": "custom"}
 
 
 def test_deliver_resumes_when_turn_start_reports_the_thread_not_found(tmp_path):

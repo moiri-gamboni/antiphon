@@ -664,20 +664,21 @@ class Bridge:
         # Subscribing after the adoption so a thread found in this pass is live in it too.
         for thread in list(self.state.threads.values()):
             if self.subscribed.get(thread.thread_id) != d.epoch and thread.status != "unloaded":
-                await self._subscribe(d, thread)
+                await self._subscribe(d, thread, cold=thread.thread_id not in loaded)
             if thread.child_pid is None:
                 await self.ensure_peer(thread)
 
-    async def _subscribe(self, d: Daemon, thread: ThreadState) -> None:
+    async def _subscribe(self, d: Daemon, thread: ThreadState, cold: bool) -> None:
         """Resume the thread on this connection, so its turn endings, status changes and
         escalations arrive as notifications instead of being polled. This costs a thread a
         human is driving from a terminal nothing: in `tui-routing.jsonl` an escalation the
         terminal raised reaches the subscribed client as well, and the terminal's pane still
         shows its own approval prompt. The bridge listens and never answers for it, so the
-        prompt stays the human's to decide."""
+        prompt stays the human's to decide. A `cold` thread, one the daemon does not have
+        loaded, is rebuilt by this resume and gets its instructions back with it."""
         was_busy = thread.status in ("busy", "approval")
         try:
-            result = await d.thread_resume(thread.thread_id)
+            result = await d.thread_resume(thread.thread_id, thread.instructions if cold else None)
         except DaemonError as e:
             if e.error.get("message", "").startswith("no rollout found"):
                 # A thread with no turn yet has no rollout file; it becomes resumable
@@ -914,7 +915,7 @@ class Bridge:
         """The daemon connection, with `thread` resumed first if it was unloaded."""
         d = await self._require_daemon()
         if thread.status == "unloaded":
-            result = await d.thread_resume(thread.thread_id)
+            result = await d.thread_resume(thread.thread_id, thread.instructions)
             self.subscribed[thread.thread_id] = d.epoch
             self._set_status(thread, _status_of(result["thread"]))
         return d
@@ -923,7 +924,7 @@ class Bridge:
         """Steer or start a turn on a hosted thread, resuming it first if it was unloaded."""
         d = await self.ensure_loaded(thread)
         effort = None if thread.effort_sent else thread.effort
-        delivery = await deliver(d, thread.thread_id, text, self._sandbox_policy(thread), effort)
+        delivery = await deliver(d, thread.thread_id, text, self._sandbox_policy(thread), effort, thread.instructions)
         if delivery.kind == "started":
             thread.effort_sent = True
         thread.active_turn_id = delivery.turn_id
@@ -1024,6 +1025,7 @@ class Bridge:
             thread = ThreadState(
                 thread_id=thread_id, name=name, cwd=cwd, origin="spawned", spawner=caller.owner_id,
                 read_only=args["read_only"], report=args["report"], effort=args.get("effort"), worktree=worktree,
+                instructions=daemon_mod.HEADLESS_INSTRUCTIONS,
             )
             self.state.threads[thread_id] = thread
             # thread/start subscribes the connection that made it.
