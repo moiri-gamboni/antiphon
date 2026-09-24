@@ -154,6 +154,12 @@ A long turn (`sleep 45`) started, then a second `turn/start` sent on the same th
 
 What it pins: the daemon **does not refuse a `turn/start` while a turn is running**, and does not start a second turn. It answers with the turn already in progress (the same `turn.id` the first call returned) and puts the text into it: the transcript shows the second `userMessage` item mid-turn and the final answer is "SLEPT BANANA". So a second start behaves as a steer, and the race where a turn begins between reading a thread's status and acting on it costs a message nothing. An earlier run of the same shape (`turn-active.jsonl`: `sleep 60`, the second `turn/start` twelve seconds in, then `turn/interrupt`) confirms the no-error half separately, by interrupting instead of waiting. There is accordingly no "turn already active" error: the delivery ladder's rung for one was removed, having been built on an invented message.
 
+### `thread-delete.jsonl`
+
+Three connections, each frame tagged `A/`, `B/` or `C/` like `two-subscribers.jsonl`, from `scripts/thread-delete.py` on `codex-cli 0.156.1`. A starts a thread, runs a benign turn so a rollout exists, and unsubscribes, the position the bridge is in after `antiphon stop`; B initializes and subscribes to nothing; C deletes the thread with `thread/delete`, then tries `thread/resume` and `thread/read` on it.
+
+What it pins: `thread/delete` answers `{}`, and **every connection receives `thread/deleted` `{"threadId"}`**, the unsubscribed A and the never-subscribed B included, after two `thread/status/changed` to `notLoaded`. A deleted thread is gone for good: `thread/resume` fails with `-32600 no rollout found for thread id ...` (the message a thread with no turn yet also gets) and `thread/read` with `-32600 thread not loaded: ...`.
+
 ### `two-subscribers.jsonl`
 
 `approvalsReviewer: "user"`: two connections on one thread, each frame tagged `A/` or `B/` by the connection that saw it (`{"from": "A"|"B", "sent"|"recv": ...}`), from `scripts/antiphon-two-subs.py`. A starts the thread (subscribing itself), runs a benign turn so a rollout exists, then B resumes it (subscribing itself); A then raises a write outside the workspace and answers its own `item/commandExecution/requestApproval` with `accept`, while B only watches.

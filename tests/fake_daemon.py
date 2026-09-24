@@ -78,7 +78,9 @@ def load_fixture(name: str) -> Fixture:
     lines = []
     for raw in (FIXTURES / name).read_text().splitlines():
         if raw.startswith("{"):
-            lines.append(json.loads(raw))
+            line = json.loads(raw)
+            # A capture over several connections tags each frame with the one that saw it.
+            lines.append(line["recv"] if "recv" in line else line)
     return Fixture(lines)
 
 
