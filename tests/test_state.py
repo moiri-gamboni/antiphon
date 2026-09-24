@@ -35,6 +35,7 @@ def test_save_then_load_round_trips_every_field(tmp_path):
     state = State()
     state.threads["01a0c390-e298-7b53-87d2-3333c99c6ac4"] = full_thread()
     state.stopped["old-name"] = "01a0c395-d415-70c0-bdce-5dcdf4319394"
+    state.stopped_instructions["01a0c395-d415-70c0-bdce-5dcdf4319394"] = "Answer in French."
     state.degraded = ["~/.claude/sessions/1002.json: required field pidDomain is missing"]
     state.save(path)
 

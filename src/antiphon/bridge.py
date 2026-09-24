@@ -276,6 +276,7 @@ class Bridge:
             "turn/started": self.on_turn_started,
             "turn/completed": self.on_turn_completed,
             "thread/closed": self.on_thread_closed,
+            "thread/deleted": self.on_thread_deleted,
             "thread/name/updated": self.on_thread_name_updated,
             "error": self.on_error,
         }
@@ -562,6 +563,19 @@ class Bridge:
         if thread.origin == "spawned" and thread.report and thread.spawner != "human":
             await self.deliver_to_spawner(thread, final)
         await self._child_idle(thread, final[:IDLE_DETAIL_CHARS])
+
+    async def on_thread_deleted(self, params) -> None:
+        """A deleted thread is gone for good: nothing can resume it (`thread-delete.jsonl`:
+        every connection hears of it, subscribed or not, and a later thread/resume finds no
+        rollout), so neither a hosted thread nor what a stopped one kept for its resume stays."""
+        thread_id = params["threadId"]
+        thread = self.state.threads.get(thread_id)
+        if thread is not None:
+            await self._retire(thread)
+        self.state.stopped_instructions.pop(thread_id, None)
+        for name in [n for n, tid in self.state.stopped.items() if tid == thread_id]:
+            del self.state.stopped[name]
+        self.save()
 
     async def on_thread_closed(self, params) -> None:
         thread = self.state.threads.get(params["threadId"])
@@ -1223,6 +1237,8 @@ class Bridge:
                 log.info("unsubscribe on stop of %s refused: %r", thread.name, e)
         await self._retire(thread)
         self.state.stopped[thread.name] = thread.thread_id
+        if thread.instructions is not None:
+            self.state.stopped_instructions[thread.thread_id] = thread.instructions
         reply = {"name": thread.name, "thread_id": thread.thread_id}
         if thread.worktree is not None:
             reason = await asyncio.to_thread(self._remove_worktree, thread.worktree)
@@ -1253,8 +1269,12 @@ class Bridge:
             if thread_id in self.state.threads:
                 thread = self.state.threads[thread_id]
                 return {"name": thread.name, "thread_id": thread_id}
+            # A stopped thread the daemon has since unloaded is rebuilt by this resume, and
+            # gets back the instructions it was started with (see `Daemon.thread_resume`).
+            instructions = self.state.stopped_instructions.get(thread_id)
+            cold = instructions is not None and thread_id not in await d.loaded_list()
             try:
-                result = await d.thread_resume(thread_id)
+                result = await d.thread_resume(thread_id, instructions if cold else None)
             except DaemonError as e:
                 raise IpcError("precondition", f"thread/resume {thread_id} failed: {e.error.get('message')}", e.error) from e
             info = result["thread"]
@@ -1263,11 +1283,13 @@ class Bridge:
             thread = ThreadState(
                 thread_id=thread_id, name=name, cwd=info["cwd"], origin="spawned", spawner=caller.owner_id,
                 read_only=(result.get("sandbox") or {}).get("type") == "readOnly", status=_status_of(info),
+                instructions=instructions,
             )
             self.state.threads[thread_id] = thread
             self.subscribed[thread_id] = d.epoch
             if former is not None:
                 del self.state.stopped[former]
+            self.state.stopped_instructions.pop(thread_id, None)
             self.save()
             await self.ensure_peer(thread)
         return {"name": name, "thread_id": thread_id}

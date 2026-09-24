@@ -92,6 +92,9 @@ class State:
     threads: dict[str, ThreadState] = field(default_factory=dict)
     sessions: dict[str, SessionState] = field(default_factory=dict)
     stopped: dict[str, str] = field(default_factory=dict)  # former name -> thread id, so `send` can name the resume command
+    # thread id -> the instructions a stopped thread was started with, for `resume` to send
+    # again; kept until the thread is resumed or the daemon reports it deleted.
+    stopped_instructions: dict[str, str] = field(default_factory=dict)
     degraded: list[str] = field(default_factory=list)
 
     @classmethod
@@ -105,7 +108,8 @@ class State:
             sub_agents = {k: SubAgent(**v) for k, v in raw.pop("sub_agents").items()}
             threads[thread_id] = ThreadState(**raw, sub_agents=sub_agents)
         sessions = {k: SessionState(**v) for k, v in data.get("sessions", {}).items()}
-        return cls(threads=threads, sessions=sessions, stopped=data["stopped"], degraded=data["degraded"])
+        return cls(threads=threads, sessions=sessions, stopped=data["stopped"],
+                   stopped_instructions=data.get("stopped_instructions", {}), degraded=data["degraded"])
 
     def save(self, path: Path | str) -> None:
         path = Path(path)
@@ -114,6 +118,7 @@ class State:
             "threads": {k: dataclasses.asdict(t) for k, t in self.threads.items()},
             "sessions": {k: dataclasses.asdict(s) for k, s in self.sessions.items()},
             "stopped": self.stopped,
+            "stopped_instructions": self.stopped_instructions,
             "degraded": self.degraded,
         }
         # Written whole then renamed, so a crash mid-write leaves the previous file intact.

@@ -153,7 +153,7 @@ Options go before the `--` separator; everything after it is the prompt or messa
 | `status [TARGET]` | A thread's state (status, active turn, last outcome, pending escalations, sub-agents, worktree), a started session's (directory, spawner, job id, pending escalations), or with no target the bridge's |
 | `ls` | Every peer on the machine: Claude Code sessions, Codex threads, and Codex sub-agents indented under their parent. The first line names the caller when it is a peer; `*` marks its row |
 | `stop TARGET` | Retires a thread as a peer, or ends a started Claude Code session (`claude stop`). Transcripts and `--worktree` branches stay; a clean worktree checkout is removed, a dirty one kept |
-| `resume TARGET` | Hosts a stopped thread again, or any thread id the daemon knows, with its context and former name |
+| `resume TARGET` | Hosts a stopped thread again, or any thread id the daemon knows, with its context, former name and the instructions it was started with |
 | `name [TARGET] NEW` | Renames a thread; inside a Codex thread with no target, that thread |
 | `attach TARGET` | Opens the thread or started session in a new tmux window, or prints the command that does |
 | `notify TARGET` | From inside a Codex thread: one message back when the target's turn next ends |

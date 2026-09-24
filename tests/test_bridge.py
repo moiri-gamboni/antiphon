@@ -24,6 +24,7 @@ SUB_AGENT = load_fixture("sub-agent.jsonl")
 TURNS_LIST = load_fixture("turns-list.jsonl")
 RESTART = load_fixture("daemon-restart.jsonl")
 HOOK_ORDER = load_fixture("permission-hook-order.jsonl")
+DELETE = load_fixture("thread-delete.jsonl")
 
 THREAD_ID = THREAD_START.result(2)["thread"]["id"]
 TURN_STARTED = APPROVAL.result(3)
@@ -38,6 +39,7 @@ SUB_AGENT_PARENT = SUB_AGENT_THREAD["parentThreadId"]
 FAILED_TURN = [n for n in HOOK_ORDER.notifications("turn/completed") if n["turn"]["status"] == "failed"][0]
 COMPLETED_NOTICE = [n for n in HOOK_ORDER.notifications("turn/completed") if n["turn"]["status"] == "completed"][0]
 ERROR_NOTICE = HOOK_ORDER.notifications("error")[0]
+DELETED_NOTICE = {**DELETE.notifications("thread/deleted")[0], "threadId": THREAD_ID}
 STEERED = {"turnId": TURN_ID}
 
 HUMAN = Caller(kind="human", claude_pid=None, claude_session_id=None, codex_thread=None)
@@ -1040,9 +1042,70 @@ def test_resume_rehosts_a_stopped_thread_under_the_caller(short_tmp):
 
     result, thread, stopped, params = run(body())
     assert result == {"name": "helper", "thread_id": THREAD_ID}
-    assert params == {"threadId": THREAD_ID}
+    # The daemon lists nothing loaded, so the resume rebuilds the thread and carries its instructions.
+    assert params == {"threadId": THREAD_ID, "developerInstructions": HEADLESS_INSTRUCTIONS}
     assert (thread.spawner, thread.origin, thread.status, thread.read_only) == (CLAUDE.claude_session_id, "spawned", "idle", False)
     assert stopped == {}
+
+
+def test_resume_after_stop_sends_the_instructions_the_thread_was_started_with(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(instructions="Answer in French.")
+            await rig.bridge.dispatch("stop", {"target": "helper"}, HUMAN)
+            kept = json.loads((rig.home / "state.json").read_text())["stopped_instructions"]
+            await rig.bridge.dispatch("resume", {"target": "helper"}, HUMAN)
+            thread = rig.bridge.state.threads[THREAD_ID]
+            return kept, rig.fake.received("thread/resume")[-1]["params"], thread.instructions, rig.bridge.state.stopped_instructions
+
+    kept, params, instructions, left = run(body())
+    expected = HEADLESS_INSTRUCTIONS + "\n\nAnswer in French."
+    assert kept == {THREAD_ID: expected}
+    assert params == {"threadId": THREAD_ID, "developerInstructions": expected}
+    # Rehosted, the thread carries them again for the next resume that rebuilds it.
+    assert instructions == expected
+    assert left == {}
+
+
+def test_resume_of_a_stopped_thread_still_loaded_rejoins_it_without_instructions(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(instructions="Answer in French.")
+            await rig.bridge.dispatch("stop", {"target": "helper"}, HUMAN)
+            rig.fake.replies["thread/loaded/list"] = {"result": {"data": [THREAD_ID], "nextCursor": None}}
+            await rig.bridge.dispatch("resume", {"target": "helper"}, HUMAN)
+            return rig.fake.received("thread/resume")[-1]["params"], rig.bridge.state.threads[THREAD_ID].instructions
+
+    params, instructions = run(body())
+    assert params == {"threadId": THREAD_ID}
+    assert instructions == HEADLESS_INSTRUCTIONS + "\n\nAnswer in French."
+
+
+def test_a_deleted_thread_leaves_nothing_behind_for_a_resume(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread(instructions="Answer in French.")
+            await rig.bridge.dispatch("stop", {"target": "helper"}, HUMAN)
+            await rig.fake.notify("thread/deleted", DELETED_NOTICE)
+            await until(lambda: not rig.bridge.state.stopped)
+            return json.loads((rig.home / "state.json").read_text())
+
+    state = run(body())
+    assert state["stopped"] == {}
+    assert state["stopped_instructions"] == {}
+
+
+def test_a_hosted_thread_that_is_deleted_is_retired(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_thread()
+            await rig.fake.notify("thread/deleted", DELETED_NOTICE)
+            await until(lambda: THREAD_ID not in rig.bridge.state.threads)
+            return rig.bridge.state
+
+    state = run(body())
+    assert state.threads == {}
+    assert state.stopped == {}
 
 
 def test_resume_of_a_never_hosted_thread_by_id_names_it_after_its_directory(short_tmp):

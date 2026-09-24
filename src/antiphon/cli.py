@@ -546,7 +546,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("ls", help="every peer on this machine")
     sub.add_parser("stop", help="retire the thread as a peer, or end a Claude Code session started here (transcripts stay; "
                                 "a clean --worktree checkout is removed, a dirty one and the branch are kept)").add_argument("target")
-    sub.add_parser("resume", help="host a stopped or never-hosted thread again, with its context and former name").add_argument("target")
+    sub.add_parser("resume", help="host a stopped or never-hosted thread again, with its context, former name and "
+                                  "the instructions it was started with").add_argument("target")
     name = sub.add_parser("name", help="rename a thread (from inside a Codex thread, the thread itself when no target is given)")
     name.add_argument("target", nargs="?")
     name.add_argument("new")
