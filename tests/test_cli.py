@@ -759,11 +759,21 @@ def test_start_claude_refuses_the_flags_that_only_fit_a_codex_thread(tmp_path, c
     assert "--read-only" in capsys.readouterr().err
 
 
-def test_start_claude_refuses_instructions_as_a_codex_thread_option(tmp_path, capsys):
+def test_start_claude_sends_the_instruction_files_body_alone(tmp_path, capsys):
+    agent = tmp_path / "agent.md"
+    agent.write_text(AGENT_FILE)
     client = RecordingClient(tmp_path, start_claude=STARTED_SESSION)
-    assert cli.verb_start(start_claude_args(instructions=str(tmp_path / "agent.md")), client) == 2
+    assert cli.verb_start(start_claude_args(instructions=str(agent)), client) == 0
+    [(op, sent)] = client.calls
+    # A Claude Code session keeps its own system prompt; antiphon's headless text is for Codex threads.
+    assert sent["instructions"] == "You trace execution paths.\n---\nReport file:line references."
+
+
+def test_start_claude_refuses_an_unreadable_instructions_file_before_starting_anything(tmp_path, capsys):
+    client = RecordingClient(tmp_path, start_claude=STARTED_SESSION)
+    assert cli.verb_start(start_claude_args(instructions=str(tmp_path / "nowhere.md")), client) == 2
     assert client.calls == []
-    assert "--instructions apply to Codex threads, not to --claude sessions" in capsys.readouterr().err
+    assert "cannot read" in capsys.readouterr().err
 
 
 def test_start_claude_says_so_when_no_forward_hook_was_installed(tmp_path, capsys):

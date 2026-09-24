@@ -168,8 +168,6 @@ def verb_start(args, client: Client) -> int:
     if misplaced is not None:
         print(f'antiphon: {misplaced} goes before the --: antiphon start {misplaced} -- "<brief>"', file=sys.stderr)
         return 2
-    if args.claude:
-        return _start_claude(args, client)
     instructions = None
     if args.instructions is not None:
         try:
@@ -180,6 +178,8 @@ def verb_start(args, client: Client) -> int:
         if not instructions:
             print(f"antiphon: --instructions: {args.instructions} is empty once its frontmatter is dropped", file=sys.stderr)
             return 2
+    if args.claude:
+        return _start_claude(args, client, instructions)
     result = client.call("start", {
         "cwd": os.path.abspath(args.cwd), "name": args.name, "read_only": args.read_only, "model": args.model,
         "effort": args.effort, "report": not args.no_report, "worktree": args.worktree,
@@ -195,19 +195,18 @@ def verb_start(args, client: Client) -> int:
     return _send(client, result["thread_id"], " ".join(args.prompt), args.wait, args.timeout)
 
 
-def _start_claude(args, client: Client) -> int:
+def _start_claude(args, client: Client, instructions: str | None) -> int:
     """`start --claude`: a Claude Code session of the caller's own, in the background."""
     unsupported = [name for flag, name in (
         (args.read_only, "--read-only"), (args.effort, "--effort"), (args.worktree, "--worktree"),
         (args.review_by_parent, "--review-by-parent"), (args.wait, "--wait"), (args.no_report, "--no-report"),
-        (args.instructions, "--instructions"),
     ) if flag]
     if unsupported:
         print(f"antiphon: {', '.join(unsupported)} apply to Codex threads, not to --claude sessions", file=sys.stderr)
         return 2
     result = client.call("start_claude", {
         "cwd": os.path.abspath(args.cwd), "name": args.name, "model": args.model,
-        "gate": args.gate, "prompt": " ".join(args.prompt) or None,
+        "gate": args.gate, "prompt": " ".join(args.prompt) or None, "instructions": instructions,
     }, timeout=REGISTER_WAIT)
     print(f"started the Claude Code session {result['name']} ({result['session_id']}) in {result['cwd']}")
     if result["hook"] is None:
@@ -520,7 +519,8 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--instructions", metavar="FILE",
                        help="add FILE's text to the thread's developer instructions, after antiphon's own; a leading "
                             "YAML frontmatter block (a first line --- through the next --- line) is dropped, so a "
-                            "Claude Code agent or skill file passes as it is (Codex threads only)")
+                            "Claude Code agent or skill file passes as it is; with --claude, the text is appended to "
+                            "the session's system prompt instead")
     start.add_argument("--no-report", action="store_true", help="do not deliver the final answer to the spawner at turn end")
     start.add_argument("--worktree", action="store_true",
                        help="give the thread its own git worktree beside the repository, on branch codex/<name>")

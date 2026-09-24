@@ -56,6 +56,7 @@ class Spec:
     hook: str | None  # the permission-forward hook script, or None to install none
     gate: str | None  # the tool names the hook applies to; None means every tool
     prompt: str | None = None
+    instructions: str | None = None  # appended to the session's system prompt (`start --instructions`)
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,10 @@ def claude_argv(spec: Spec) -> list[str]:
         argv += ["--model", spec.model]
     if spec.hook:
         argv += ["--settings", hook_settings(spec.hook, spec.gate)]
+    if spec.instructions:
+        # `claude --bg` hands its arguments to the session process unchanged, so the
+        # session's own system prompt carries the text (observed live on 2.1.281).
+        argv += ["--append-system-prompt", spec.instructions]
     if spec.prompt:
         # A brief may well start with a dash; `--` keeps `claude` from reading it as a flag.
         argv += ["--", spec.prompt]

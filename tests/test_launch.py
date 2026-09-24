@@ -210,6 +210,13 @@ def test_without_a_gate_the_hook_applies_to_every_tool():
     assert "matcher" not in group
 
 
+def test_instructions_are_appended_to_the_sessions_system_prompt():
+    argv = launch.claude_argv(spec(instructions="You trace execution paths.", prompt="read the diff"))
+    assert argv[argv.index("--append-system-prompt") + 1] == "You trace execution paths."
+    assert argv[-2:] == ["--", "read the diff"]
+    assert "--append-system-prompt" not in launch.claude_argv(spec())
+
+
 def test_the_shipped_forward_hook_is_found_and_runnable():
     found = launch.forward_hook()
     assert found is not None and os.access(found, os.X_OK)
@@ -234,6 +241,15 @@ def test_start_claude_records_the_spawner_and_reports_the_registered_session(sho
     assert started.name == result["name"]
     assert record is not None and record.name == "helper"
     assert result["pid"] == record.pid
+
+
+def test_start_claude_hands_the_instructions_to_the_launch(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.start_claude(instructions="You trace execution paths.")
+            return rig.launcher.specs[0]
+
+    assert run(body()).instructions == "You trace execution paths."
 
 
 def test_start_claude_from_a_claude_session_is_a_usage_error(short_tmp):

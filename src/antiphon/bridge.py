@@ -1047,6 +1047,7 @@ class Bridge:
         spec = launch_mod.Spec(
             name=registry.unique_name(wanted, self.taken_names()), cwd=cwd,
             model=args.get("model"), hook=launch_mod.forward_hook(), gate=args.get("gate"), prompt=args.get("prompt"),
+            instructions=args.get("instructions"),
         )
         try:
             launched = await self._launch_claude(spec, self.rawlog)
