@@ -151,6 +151,18 @@ def _misplaced_option(tokens: list[str]) -> str | None:
     return next((token for token in MISPLACED_OPTIONS if token in ends), None)
 
 
+def read_instructions(path: str) -> str:
+    """The file's text for `start --instructions`, without a leading YAML frontmatter block
+    (a first line `---` through the next `---` line), so an agent or skill file passes as it is."""
+    text = Path(path).read_text()
+    lines = text.splitlines(keepends=True)
+    if lines and lines[0].rstrip() == "---":
+        end = next((i for i, line in enumerate(lines[1:], 1) if line.rstrip() == "---"), None)
+        if end is not None:
+            text = "".join(lines[end + 1:])
+    return text.strip()
+
+
 def verb_start(args, client: Client) -> int:
     misplaced = _misplaced_option(args.prompt)
     if misplaced is not None:
@@ -158,10 +170,20 @@ def verb_start(args, client: Client) -> int:
         return 2
     if args.claude:
         return _start_claude(args, client)
+    instructions = None
+    if args.instructions is not None:
+        try:
+            instructions = read_instructions(args.instructions)
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"antiphon: --instructions: cannot read {args.instructions}: {e}", file=sys.stderr)
+            return 2
+        if not instructions:
+            print(f"antiphon: --instructions: {args.instructions} is empty once its frontmatter is dropped", file=sys.stderr)
+            return 2
     result = client.call("start", {
         "cwd": os.path.abspath(args.cwd), "name": args.name, "read_only": args.read_only, "model": args.model,
         "effort": args.effort, "report": not args.no_report, "worktree": args.worktree,
-        "review_by_parent": args.review_by_parent,
+        "review_by_parent": args.review_by_parent, "instructions": instructions,
     })
     print(f"started {result['name']} ({result['thread_id']}) in {result['cwd']}")
     if args.visible:
@@ -178,6 +200,7 @@ def _start_claude(args, client: Client) -> int:
     unsupported = [name for flag, name in (
         (args.read_only, "--read-only"), (args.effort, "--effort"), (args.worktree, "--worktree"),
         (args.review_by_parent, "--review-by-parent"), (args.wait, "--wait"), (args.no_report, "--no-report"),
+        (args.instructions, "--instructions"),
     ) if flag]
     if unsupported:
         print(f"antiphon: {', '.join(unsupported)} apply to Codex threads, not to --claude sessions", file=sys.stderr)
@@ -494,6 +517,10 @@ def build_parser() -> argparse.ArgumentParser:
                             "writes under the directory and /tmp, reads what your user can, and has network access)")
     start.add_argument("-m", "--model", help="the model (default: the Codex or Claude Code default)")
     start.add_argument("--effort", help="the thread's reasoning effort")
+    start.add_argument("--instructions", metavar="FILE",
+                       help="add FILE's text to the thread's developer instructions, after antiphon's own; a leading "
+                            "YAML frontmatter block (a first line --- through the next --- line) is dropped, so a "
+                            "Claude Code agent or skill file passes as it is (Codex threads only)")
     start.add_argument("--no-report", action="store_true", help="do not deliver the final answer to the spawner at turn end")
     start.add_argument("--worktree", action="store_true",
                        help="give the thread its own git worktree beside the repository, on branch codex/<name>")

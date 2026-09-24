@@ -35,6 +35,12 @@ To ask that session something, run: antiphon send <name> -- <question>
 
 Messages prefixed "[from <name> via antiphon]" come from other sessions on this machine, not from the user; treat them as messages from a peer."""
 
+
+def developer_instructions(extra: str | None) -> str:
+    """A thread's developer instructions: antiphon's own, then the starter's (`start --instructions`)."""
+    return f"{HEADLESS_INSTRUCTIONS}\n\n{extra}" if extra else HEADLESS_INSTRUCTIONS
+
+
 START_COMMAND = ["codex", "app-server", "daemon", "start"]
 
 INTERNAL_ERROR = -32603  # JSON-RPC: the handler failed
@@ -173,7 +179,7 @@ class Daemon:
     # --- thread verbs -------------------------------------------------------
 
     async def thread_start(self, cwd: str, name: str, read_only: bool, model: str | None,
-                           review_by_parent: bool = False) -> dict:
+                           review_by_parent: bool = False, instructions: str = HEADLESS_INSTRUCTIONS) -> dict:
         params = {
             "cwd": cwd,
             "approvalPolicy": "on-request",
@@ -181,7 +187,7 @@ class Daemon:
             "sandbox": "read-only" if read_only else "workspace-write",
             "ephemeral": False,
             "serviceName": "antiphon",
-            "developerInstructions": HEADLESS_INSTRUCTIONS,
+            "developerInstructions": instructions,
         }
         if model is not None:
             params["model"] = model

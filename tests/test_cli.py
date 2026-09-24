@@ -15,6 +15,7 @@ import pytest
 
 from antiphon import cli, ipc
 from antiphon.bridge import Bridge
+from antiphon.codex.daemon import HEADLESS_INSTRUCTIONS
 from fake_claude import FakeClaude
 from fake_daemon import FakeDaemonThread, load_fixture
 
@@ -190,6 +191,54 @@ def test_start_defaults_the_directory_to_the_callers_cwd(rig, capsys, monkeypatc
     monkeypatch.chdir(rig.tmp)
     assert rig.run("start", "-n", "helper", capsys=capsys)[0] == 0
     assert rig.daemon.received("thread/start")[0]["params"]["cwd"] == str(rig.tmp)
+
+
+AGENT_FILE = """---
+name: code-explorer
+description: traces a feature through the code
+tools: Read, Grep
+---
+
+You trace execution paths.
+---
+Report file:line references.
+"""
+
+
+def test_read_instructions_drops_a_leading_frontmatter_block_and_nothing_else(tmp_path):
+    agent = tmp_path / "agent.md"
+    agent.write_text(AGENT_FILE)
+    assert cli.read_instructions(str(agent)) == "You trace execution paths.\n---\nReport file:line references."
+
+
+def test_read_instructions_keeps_a_file_without_frontmatter_whole(tmp_path):
+    plain = tmp_path / "plain.md"
+    plain.write_text("# Role\n\nYou review diffs.\n---\nBe terse.\n")
+    unclosed = tmp_path / "unclosed.md"
+    unclosed.write_text("---\nname: x\nYou review diffs.\n")
+    assert cli.read_instructions(str(plain)) == "# Role\n\nYou review diffs.\n---\nBe terse."
+    assert cli.read_instructions(str(unclosed)) == "---\nname: x\nYou review diffs."
+
+
+def test_start_with_instructions_sends_the_files_body_after_antiphons_own(rig, capsys):
+    agent = rig.tmp / "agent.md"
+    agent.write_text(AGENT_FILE)
+    assert rig.run("start", "-n", "helper", "-C", str(rig.tmp), "--instructions", str(agent), capsys=capsys)[0] == 0
+    sent = rig.daemon.received("thread/start")[0]["params"]["developerInstructions"]
+    assert sent == HEADLESS_INSTRUCTIONS + "\n\nYou trace execution paths.\n---\nReport file:line references."
+
+
+def test_start_refuses_a_missing_or_empty_instructions_file_before_starting_anything(rig, capsys):
+    missing = rig.tmp / "nowhere.md"
+    code, out, err = rig.run("start", "-n", "helper", "-C", str(rig.tmp), "--instructions", str(missing), capsys=capsys)
+    assert code == 2
+    assert f"cannot read {missing}" in err
+    empty = rig.tmp / "empty.md"
+    empty.write_text("---\nname: x\n---\n\n")
+    code, out, err = rig.run("start", "-n", "helper", "-C", str(rig.tmp), "--instructions", str(empty), capsys=capsys)
+    assert code == 2
+    assert "is empty" in err
+    assert rig.daemon.received("thread/start") == []
 
 
 def test_send_wait_prints_the_final_answer(rig, capsys):
@@ -708,6 +757,13 @@ def test_start_claude_refuses_the_flags_that_only_fit_a_codex_thread(tmp_path, c
     assert cli.verb_start(start_claude_args(read_only=True), client) == 2
     assert client.calls == []
     assert "--read-only" in capsys.readouterr().err
+
+
+def test_start_claude_refuses_instructions_as_a_codex_thread_option(tmp_path, capsys):
+    client = RecordingClient(tmp_path, start_claude=STARTED_SESSION)
+    assert cli.verb_start(start_claude_args(instructions=str(tmp_path / "agent.md")), client) == 2
+    assert client.calls == []
+    assert "--instructions apply to Codex threads, not to --claude sessions" in capsys.readouterr().err
 
 
 def test_start_claude_says_so_when_no_forward_hook_was_installed(tmp_path, capsys):

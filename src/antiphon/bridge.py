@@ -1008,11 +1008,12 @@ class Bridge:
         if args["worktree"]:
             worktree = await asyncio.to_thread(self._add_worktree, cwd, name)
             cwd = worktree
+        instructions = daemon_mod.developer_instructions(args.get("instructions"))
         # The daemon broadcasts thread/started before thread/start's own reply chain is
         # done; holding the reconcile lock keeps that pass from adopting our own thread.
         async with self._reconcile_lock:
             try:
-                result = await d.thread_start(cwd, name, args["read_only"], args.get("model"), args["review_by_parent"])
+                result = await d.thread_start(cwd, name, args["read_only"], args.get("model"), args["review_by_parent"], instructions)
             except (DaemonError, TransportClosed, TimeoutError) as e:
                 if worktree is not None:
                     # The start did not complete, so its worktree and branch are ours to undo,
@@ -1025,7 +1026,7 @@ class Bridge:
             thread = ThreadState(
                 thread_id=thread_id, name=name, cwd=cwd, origin="spawned", spawner=caller.owner_id,
                 read_only=args["read_only"], report=args["report"], effort=args.get("effort"), worktree=worktree,
-                instructions=daemon_mod.HEADLESS_INSTRUCTIONS,
+                instructions=instructions,
             )
             self.state.threads[thread_id] = thread
             # thread/start subscribes the connection that made it.

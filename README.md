@@ -145,7 +145,7 @@ Options go before the `--` separator; everything after it is the prompt or messa
 | Verb | What it does |
 |---|---|
 | `ping` | Reports whether the bridge is up and what it talks to: `bridge ok · codex <version> · claude <version> · peers <n>` |
-| `start [-- PROMPT]` | Starts a Codex thread in the current directory (or `-C DIR`), idle until sent to unless a prompt follows `--`. `--read-only`, `--worktree`, `--review-by-parent`, `--no-report` and `--wait` are described above |
+| `start [-- PROMPT]` | Starts a Codex thread in the current directory (or `-C DIR`), idle until sent to unless a prompt follows `--`. `--read-only`, `--worktree`, `--review-by-parent`, `--no-report` and `--wait` are described above; `--instructions FILE` adds the file's text, minus any leading YAML frontmatter, to the thread's developer instructions, so a Claude Code agent definition can brief it as is |
 | `start --claude [-- PROMPT]` | Starts a background Claude Code session instead, and waits up to 10 s for it to register as a peer; `--gate` picks the tools whose calls it asks about |
 | `send TARGET -- TEXT` | Steers the target's running turn, or starts a turn if it is idle. To a Claude Code session, or from a Codex thread to a thread it did not start, it sends a labelled cross-session message instead, which `--wait` cannot wait on |
 | `wait TARGET` | Waits for the thread's turn to end (default 600 s) and prints its final answer, or `<status>: <error>`. From a Codex thread, also waits for the next idle notice of a Claude Code session antiphon started |

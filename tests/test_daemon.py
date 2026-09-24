@@ -425,6 +425,22 @@ def test_thread_start_read_only_model_and_parent_review_map_to_their_parameters(
     assert params["approvalsReviewer"] == "user"
 
 
+def test_developer_instructions_put_the_starters_text_after_antiphons_own():
+    assert daemon_mod.developer_instructions(None) == daemon_mod.HEADLESS_INSTRUCTIONS
+    assert daemon_mod.developer_instructions("Be brief.") == daemon_mod.HEADLESS_INSTRUCTIONS + "\n\nBe brief."
+
+
+def test_thread_start_sends_the_instructions_it_is_given(tmp_path):
+    async def body():
+        async with Harness(tmp_path) as h:
+            h.fake.replies["thread/start"] = {"result": THREAD_START.result(2)}
+            h.fake.replies["thread/name/set"] = {"result": {}}
+            await h.daemon.thread_start("/tmp/work", "helper", read_only=True, model=None, instructions="custom")
+            return h.fake.received("thread/start")[0]["params"]
+
+    assert run(body())["developerInstructions"] == "custom"
+
+
 def test_thread_resume_carries_instructions_only_when_given(tmp_path):
     resume = load_fixture("daemon-restart.jsonl")
 
