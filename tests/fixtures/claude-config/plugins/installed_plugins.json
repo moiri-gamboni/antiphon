@@ -1,0 +1,35 @@
+{
+  "version": 2,
+  "plugins": {
+    "praxis@praxis-marketplace": [
+      {
+        "scope": "user",
+        "installPath": "~/.claude/plugins/cache/praxis-marketplace/praxis/2.3.5",
+        "version": "2.3.5",
+        "installedAt": "2026-03-31T06:17:10.540Z",
+        "lastUpdated": "2026-09-24T09:25:11.260Z",
+        "gitCommitSha": "de9bdea0aec0cf0210f0a2ee7c962e8d092e34ce"
+      }
+    ],
+    "notes@private-marketplace": [
+      {
+        "scope": "user",
+        "installPath": "~/.claude/plugins/cache/private-marketplace/notes/ed05ba005eee",
+        "version": "ed05ba005eee",
+        "installedAt": "2026-09-21T21:35:02.595Z",
+        "lastUpdated": "2026-09-27T22:52:00.346Z",
+        "gitCommitSha": "ed05ba005eee9033ba0d90b7e8737de05a72aa7a"
+      }
+    ],
+    "serena@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "~/.claude/plugins/cache/claude-plugins-official/serena/2a8ad9f74633",
+        "version": "2a8ad9f74633",
+        "installedAt": "2026-09-24T16:44:22.125Z",
+        "lastUpdated": "2026-09-30T06:03:12.588Z",
+        "gitCommitSha": "2a8ad9f74633d10e3d9bb0660a03bfc6e50584b1"
+      }
+    ]
+  }
+}

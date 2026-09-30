@@ -2,7 +2,7 @@
 
 Every file here is a raw exchange with a real Codex app-server daemon or a real Claude Code session, recorded with `capture_daemon.py` (Codex side) or the peer stub used for the Claude side, then passed through `scrub.py`. Tests replay these; nothing in them is typed from memory. `scripts/` holds the scripts that drove some of the runs, named where their capture is described.
 
-**Codex CLI version: `codex-cli 0.155.1`** (`codex update` ran before the captures and reported 0.155.1 as the latest, so nothing changed; the captures are valid for that version only). Claude Code version in the peer captures: 2.1.278 (`version` in the registry record).
+**Codex CLI version: `codex-cli 0.155.1`** (`codex update` ran before the captures and reported 0.155.1 as the latest, so nothing changed; the captures are valid for that version only; a capture made with a later one names its version in its section). Claude Code version in the peer captures: 2.1.278 (`version` in the registry record).
 
 Codex `features.multi_agent_v2 = true` was set in the user config for every Codex capture, and `config: {"features": {"multi_agent_v2": true}}` was also passed on `thread/start` in `permission-hook-order.jsonl`. The `thread/start` result reads `multiAgentMode: "explicitRequestOnly"` with or without that parameter, so whether the daemon honours the per-thread `config` for that feature is not distinguishable from these captures; the user config is the route that is known to work.
 
@@ -223,6 +223,23 @@ What it pins: the reply is `{"data": [{"cwd", "hooks": [...], "warnings": [], "e
 `codex-hook-schemas/` holds the six generated JSON schemas for the `PermissionRequest`, `PreToolUse` and `PostToolUse` command-hook stdin and stdout, copied unchanged from the Codex source at the installed version (`codex-rs/hooks/schema/generated/`); the one real hook input on record is the `permission_hook_input` line of `permission-hook-order.jsonl`, whose `session_id` equals the `threadId` of the surrounding `hook/started` notification.
 
 Not captured: `config/batchWrite` (the daemon-side write of `hooks.state.<key>.trusted_hash` the Codex TUI uses to trust a hook; its request and reply shapes are taken from `codex-rs/app-server-protocol/src/protocol/v2/config.rs`), and a hook actually run by Codex through the shim.
+
+### `skills-extra-roots.jsonl`
+
+Captured with Codex 0.159.2 on a scratch daemon (its own `CODEX_HOME`) over synthetic skills under `/tmp/antiphon-skills-capture`: a Claude Code plugin layout (`plugin/demo-plugin/.claude-plugin/plugin.json` naming `demo-plugin`, one skill under its `skills/`), a plain skills directory with one skill at the top and one two levels down, a root that is itself a skill directory, and a root that does not exist. Two connections in sequence; the checkout path of the user-level `antiphon` skill was rewritten to `~/antiphon`.
+
+```
+capture_daemon.py --socket <scratch> skills/list '{"cwds":[...],"forceReload":true}' \
+  skills/extraRoots/set '{"extraRoots":[<plugin skills>, <user skills>, <single skill>, <missing>]}' skills/list '{...}'
+capture_daemon.py --socket <scratch> skills/list '{...}' skills/extraRoots/set '{"extraRoots":[<user skills>]}' \
+  skills/list '{...}' skills/extraRoots/set '{"extraRoots":[]}' skills/list '{...}'
+```
+
+What it pins: `skills/extraRoots/set` answers `{}` and broadcasts `skills/changed {}`; it replaces the whole list rather than adding to it; the list holds across connections; a missing root is skipped with no error; a root is scanned recursively; a skill directory given as a root is loaded; and a skill under a `.claude-plugin/plugin.json` is named `<plugin>:<skill>` from the manifest's `name`, the frontmatter `name` being the part after the colon. A `codex app-server daemon restart` afterwards dropped the extra roots (checked by hand, not in the file).
+
+### `claude-config/`
+
+`settings.json` (only `enabledPlugins`) and `plugins/installed_plugins.json` from a Claude Code 2.1.285 config directory, trimmed to three plugins: two enabled, one installed and not enabled. A private marketplace and its plugin were renamed (`notes@private-marketplace`) and install paths rewritten under `~/.claude`; the shape is otherwise as written. The other `scope` values an install record can carry are not in it.
 
 ## Not yet captured
 

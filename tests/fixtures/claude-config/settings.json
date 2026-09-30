@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "praxis@praxis-marketplace": true,
+    "notes@private-marketplace": true
+  }
+}
