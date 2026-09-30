@@ -815,3 +815,12 @@ def test_help_lists_every_exit_code(capsys):
     assert info.value.code == 0
     listed = out.split("exit codes:", 1)[1]
     assert [int(line.split()[0]) for line in listed.splitlines() if line.strip()] == [0, 1, 2, 3, 4, 5, 6]
+
+
+@pytest.mark.parametrize("argv", [["send"], ["hook", "install"]])
+def test_a_verbs_help_opens_with_what_the_verb_does(argv, capsys):
+    with pytest.raises(SystemExit):
+        cli.main([*argv, "--help"])
+    out = capsys.readouterr().out
+    listed = {"send": "steer a busy thread", "install": "register a Claude Code hook script"}[argv[-1]]
+    assert listed in out.split("positional arguments:", 1)[0]

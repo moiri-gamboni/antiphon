@@ -493,17 +493,22 @@ VERBS = {
 }
 
 
+def add_verb(subparsers, name: str, help: str) -> argparse.ArgumentParser:
+    """A verb whose own --help opens with the line the verb list shows."""
+    return subparsers.add_parser(name, help=help, description=help)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="antiphon", description="Codex threads as Claude Code peers, and back.",
         epilog=EXIT_CODES_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="verb", required=True)
-    sub.add_parser("ping", help="is the bridge up, and what does it speak to "
+    add_verb(sub, "ping", help="is the bridge up, and what does it speak to "
                                 "(exit 0 ok, 2 degraded with the reasons, 5 Codex daemon unreachable)")
-    sub.add_parser("bridge", help="run the bridge in the foreground")
+    add_verb(sub, "bridge", help="run the bridge in the foreground")
 
-    start = sub.add_parser("start", help="start a Codex thread (idle until sent to, unless a prompt follows --)")
+    start = add_verb(sub, "start", help="start a Codex thread (idle until sent to, unless a prompt follows --)")
     start.add_argument("-C", dest="cwd", default=os.getcwd(), help="working directory (default: the current one)")
     start.add_argument("-n", "--name",
                        help="the name peers address it by (default: codex-<directory name>, "
@@ -532,50 +537,50 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--timeout", type=float, help=f"seconds --wait waits (default: {WAIT_DEFAULT_TIMEOUT:g})")
     start.add_argument("prompt", nargs="*", help="the first turn's prompt; put options (--wait, --timeout) before the --")
 
-    send = sub.add_parser("send", help="steer a busy thread or start a turn on an idle one")
+    send = add_verb(sub, "send", help="steer a busy thread or start a turn on an idle one")
     send.add_argument("target")
     send.add_argument("--wait", action="store_true", help="wait for the turn and print its final answer (see wait)")
     send.add_argument("--timeout", type=float, help=f"seconds --wait waits (default: {WAIT_DEFAULT_TIMEOUT:g})")
     send.add_argument("text", nargs="+", help="the message; put options (--wait, --timeout) before the --")
 
-    wait = sub.add_parser("wait", help="wait for the thread's turn, or a Claude Code session's next idle, and print the outcome")
+    wait = add_verb(sub, "wait", help="wait for the thread's turn, or a Claude Code session's next idle, and print the outcome")
     wait.add_argument("target")
     wait.add_argument("--timeout", type=float,
                       help=f"seconds to wait (default: {WAIT_DEFAULT_TIMEOUT:g}); at the timeout it exits 4 and the turn goes on")
 
-    sub.add_parser("interrupt", help="end the thread's current turn (Claude Code sessions have no such surface)").add_argument("target")
-    sub.add_parser("status", help="a thread's state, or the bridge's").add_argument("target", nargs="?")
-    sub.add_parser("ls", help="every peer on this machine")
-    sub.add_parser("stop", help="retire the thread as a peer, or end a Claude Code session started here (transcripts stay; "
+    add_verb(sub, "interrupt", help="end the thread's current turn (Claude Code sessions have no such surface)").add_argument("target")
+    add_verb(sub, "status", help="a thread's state, or the bridge's").add_argument("target", nargs="?")
+    add_verb(sub, "ls", help="every peer on this machine")
+    add_verb(sub, "stop", help="retire the thread as a peer, or end a Claude Code session started here (transcripts stay; "
                                 "a clean --worktree checkout is removed, a dirty one and the branch are kept)").add_argument("target")
-    sub.add_parser("resume", help="host a stopped or never-hosted thread again, with its context, former name and "
+    add_verb(sub, "resume", help="host a stopped or never-hosted thread again, with its context, former name and "
                                   "the instructions it was started with").add_argument("target")
-    name = sub.add_parser("name", help="rename a thread (from inside a Codex thread, the thread itself when no target is given)")
+    name = add_verb(sub, "name", help="rename a thread (from inside a Codex thread, the thread itself when no target is given)")
     name.add_argument("target", nargs="?")
     name.add_argument("new")
-    attach = sub.add_parser("attach", help="open the thread or session in a new tmux window, or print the command that opens it")
+    attach = add_verb(sub, "attach", help="open the thread or session in a new tmux window, or print the command that opens it")
     attach.add_argument("target")
-    notify = sub.add_parser("notify", help="from inside a Codex thread: be messaged when a peer's turn ends")
+    notify = add_verb(sub, "notify", help="from inside a Codex thread: be messaged when a peer's turn ends")
     notify.add_argument("target")
-    sub.add_parser("approve", help="approve an escalation by its token (see the message or `ls`)").add_argument("token")
-    deny = sub.add_parser("deny", help="deny an escalation by its token, telling the thread why")
+    add_verb(sub, "approve", help="approve an escalation by its token (see the message or `ls`)").add_argument("token")
+    deny = add_verb(sub, "deny", help="deny an escalation by its token, telling the thread why")
     deny.add_argument("token")
     deny.add_argument("why", nargs="+")
 
-    hook = sub.add_parser("hook", help="run Claude Code hook scripts as Codex hooks")
+    hook = add_verb(sub, "hook", help="run Claude Code hook scripts as Codex hooks")
     hook_sub = hook.add_subparsers(dest="hook_verb", required=True)
     events = list(hooks.CLAUDE_EVENT)
-    run = hook_sub.add_parser("run", help="the shim Codex runs: Codex hook input on stdin, Codex hook output on stdout")
+    run = add_verb(hook_sub, "run", help="the shim Codex runs: Codex hook input on stdin, Codex hook output on stdout")
     run.add_argument("script", help="the Claude Code hook script")
     run.add_argument("--event", choices=events, help="override the event named in the input")
     run.add_argument("--timeout", type=float, default=hooks.DEFAULT_TIMEOUT, help="the hook's timeout in hooks.json (the budget for an ask)")
-    install = hook_sub.add_parser("install", help="register a Claude Code hook script in ~/.codex/hooks.json and trust it")
+    install = add_verb(hook_sub, "install", help="register a Claude Code hook script in ~/.codex/hooks.json and trust it")
     install.add_argument("script")
     install.add_argument("--event", choices=events, default="PreToolUse")
     install.add_argument("--matcher", help="tool name(s) the hook applies to, e.g. Bash; default: every tool")
     install.add_argument("--timeout", type=int, default=hooks.DEFAULT_TIMEOUT, help="seconds Codex gives the hook (default: Codex's own 600)")
-    hook_sub.add_parser("uninstall", help="remove the script's entry from hooks.json").add_argument("script")
-    hook_sub.add_parser("list", help="the installed scripts and whether Codex trusts them")
+    add_verb(hook_sub, "uninstall", help="remove the script's entry from hooks.json").add_argument("script")
+    add_verb(hook_sub, "list", help="the installed scripts and whether Codex trusts them")
     return parser
 
 
