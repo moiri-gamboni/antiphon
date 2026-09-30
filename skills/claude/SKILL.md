@@ -1,6 +1,6 @@
 ---
 name: antiphon
-description: Delegate work to OpenAI Codex (GPT) as peer threads through the `antiphon` CLI. Use when the user says "ask codex", "ask gpt", "delegate to codex/gpt" or "have gpt do it", wants a second model's opinion or review, when Claude's usage limit is near and the work can run on the ChatGPT plan's Codex limits instead, when a Codex thread appears in ListAgents or messages this session, or when a message mentions an antiphon token.
+description: Delegate work to OpenAI Codex (GPT) as peer threads through the `antiphon` CLI. Use before starting, briefing, steering or following up a Codex thread: whenever work is routed to Codex (the user says "ask codex" or "have gpt do it", a routing rule or hook sends it there, or Claude's usage limit is near), for a second model's opinion or review, or when a Codex thread or an antiphon token appears in this session.
 ---
 
 # Codex threads as peers: antiphon
@@ -17,9 +17,11 @@ Run `codex login status`. If it is not logged in, or turns fail with an expired 
 antiphon start -C <dir> -n <name>      # add --read-only for review or analysis, --worktree for its own git worktree
 ```
 
-then `SendMessage(to: <name>, message: <brief>, notify_when_idle: true)`. Brief it as you would a subagent and name it after its task. The brief starts the first turn; the idle notice is the completion signal, and the thread's full final answer arrives as a message from `<name>`. Follow up with `SendMessage` to the same name to keep its context: it steers a running turn and starts a new one on an idle thread.
+then `SendMessage(to: <name>, message: <brief>, notify_when_idle: true)`. Brief it as you would a subagent and name it after its task. The brief starts the first turn; the idle notice is the completion signal, and the thread's full final answer arrives as a message from `<name>`. Follow up with `SendMessage` to the same name to keep its context.
 
 For the answer in the Bash result instead, run `antiphon start -C <dir> -n <name> --no-report --wait -- "<brief>"` in a background Bash (options before the `--`, the prompt after it); `antiphon wait <name>` waits on a turn already running. A code review is a `--read-only` thread briefed to review, say, the uncommitted diff. To give the thread a subagent's role, pass that agent's definition file with `--instructions <agent>.md`: its body, without the frontmatter, joins the thread's developer instructions, and stays through `stop` and `resume`. Threads load this machine's Claude Code skills under the same names, so an agent file's `Skill: "<plugin>:<skill>"` steps work as written.
+
+A running thread takes more instructions at once: `SendMessage` (or `antiphon send <name> -- <text>`) steers its current turn, and on an idle thread starts a new one with the same context. So a correction or an added rule goes to the thread as soon as you have it, never held until its turn ends; `antiphon interrupt` is only for stopping work that has gone wrong.
 
 Use `--read-only` whenever the task is to read, review or analyse: every thread reads everything your user can, and a writable one can change every file under its directory. Before giving a writable thread a task, commit or note the dirty state so its changes stay separable, or give it `--worktree`. Before reporting its work done, check the artifact (`git diff`, the file), not just its answer.
 
