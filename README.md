@@ -112,6 +112,14 @@ Limits:
 - The hook applies to that session only and leaves `$CLAUDE_CONFIG_DIR/settings.json` alone. A session resumed later by hand (`claude --resume`) does not carry it.
 - A session antiphon started reports to a Codex thread or to nobody; it cannot report to another Claude Code session.
 
+## Your Claude Code skills in Codex threads
+
+Every Codex thread on the machine can load the skills your Claude Code sessions load, under the same names: your user skills (`$CLAUDE_CONFIG_DIR/skills/<name>/`) and the skills of each plugin `settings.json` enables, as `<plugin>:<skill>`. A brief or an agent definition that says `Skill: "praxis:test-driven-development"` works in a thread as written.
+
+The bridge hands the daemon these directories with `skills/extraRoots/set` whenever it connects (a restarted daemon forgets them; the call is verified on Codex 0.159.2) and again before each `start`, so a plugin updated since is found at its new install path. When that fails (a Codex without the call, a Claude Code config caught half-written), `start` says so on stderr, the thread starts anyway, and the daemon keeps the list it had. The list applies to the whole daemon, Codex sessions a human started included, and replaces any list another client of the daemon set. The `antiphon` skill itself is left out, since Codex has its own; so are plugins installed for one project only, and the copies under `skills/synced/`.
+
+Claude Code skills are written for its tools. The developer instructions of each thread antiphon starts map them to Codex's: the Skill tool to opening the named skill, Agent to `spawn_agent`, SendMessage to `send_message` or `antiphon send`, AskUserQuestion to asking the spawner, `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_SKILL_DIR}` to their directories, and a `` !`command` `` line to running it. A skill that depends on something with no Codex counterpart (an MCP server only Claude Code has, a Claude Code hook) still loads, and that step fails in the thread.
+
 ## Running your Claude Code hooks in Codex
 
 A PreToolUse guard you already run under Claude Code (deny `rm -rf`, deny ad-hoc writes to some API, ask before touching a directory) runs unchanged on the Codex threads antiphon spawns and on any other Codex session on the machine. `antiphon hook run` translates Codex's hook input and output to Claude Code's, field by field. To install one guard:

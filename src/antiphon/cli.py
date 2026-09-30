@@ -186,6 +186,8 @@ def verb_start(args, client: Client) -> int:
         "review_by_parent": args.review_by_parent, "instructions": instructions,
     })
     print(f"started {result['name']} ({result['thread_id']}) in {result['cwd']}")
+    if result.get("skills_warning"):
+        print(f"antiphon: {result['skills_warning']}", file=sys.stderr)
     if args.visible:
         attached = _attach(client, result["thread_id"], result["name"], result["cwd"])
         if attached != 0:

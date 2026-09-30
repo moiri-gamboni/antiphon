@@ -30,6 +30,7 @@ from antiphon import callers, ipc, peers
 from antiphon.callers import Caller
 from antiphon.claude import launch as launch_mod
 from antiphon.claude import registry
+from antiphon.claude import skills as skills_mod
 from antiphon.codex import approvals as approvals_mod
 from antiphon.codex import daemon as daemon_mod
 from antiphon.codex import hooks as hooks_mod
@@ -456,6 +457,7 @@ class Bridge:
                     self._update_degraded()
                     log.info("connected to the Codex daemon (epoch %s, codex %s)", d.epoch, d.codex_version)
                     self._spawn(self.reconcile(), "antiphon-reconcile-on-connect")
+                    self._spawn(self.share_claude_skills(d), "antiphon-skills-on-connect")
                     await d.closed.wait()
                     log.warning("daemon connection closed: %r", d.close_reason)
                 except Exception:
@@ -468,6 +470,19 @@ class Bridge:
                 continue
             await asyncio.sleep(delay)
             delay = min(delay * 2, self.reconnect_backoff[1])
+
+    async def share_claude_skills(self, d: Daemon) -> str | None:
+        """Give the daemon's threads the Claude Code skills of this machine. Sent on every
+        connection, since a restarted daemon starts without them, and before every start, so
+        a plugin updated since picks up its new install path. Answers what went wrong, if
+        anything: threads still start and run, lacking only these skills or their update."""
+        try:
+            roots = await asyncio.to_thread(skills_mod.skill_roots, self.sessions_dir.parent)
+            await d.set_skill_roots(roots)
+        except (*skills_mod.READ_ERRORS, DaemonError, TransportClosed, TimeoutError) as e:
+            log.warning("Claude Code skills not shared with the daemon: %r", e)
+            return f"Claude Code skills not shared with the thread: {e!r}"
+        return None
 
     def _watch_pinned_methods(self, d: Daemon) -> None:
         """Turn a "method not found" on a method we rely on into a degraded reason."""
@@ -1015,6 +1030,7 @@ class Bridge:
     async def op_start(self, args: dict, caller: Caller) -> dict:
         self._require_known_codex_caller(caller)
         d = await self._require_daemon()
+        skills_warning = await self.share_claude_skills(d)
         cwd = args["cwd"]
         wanted = args.get("name") or f"codex-{os.path.basename(cwd.rstrip('/'))}"
         name = registry.unique_name(wanted, self.taken_names())
@@ -1047,7 +1063,10 @@ class Bridge:
             self.subscribed[thread_id] = d.epoch
             self.save()
             await self.ensure_peer(thread)
-        return {"name": name, "thread_id": thread_id, "cwd": cwd}
+        reply = {"name": name, "thread_id": thread_id, "cwd": cwd}
+        if skills_warning:
+            reply["skills_warning"] = skills_warning
+        return reply
 
     async def op_start_claude(self, args: dict, caller: Caller) -> dict:
         """Start a Claude Code session the caller owns. The session registers itself, so

@@ -33,7 +33,9 @@ Sandbox escalations (writes outside the workspace, network access, commands the 
 
 To ask that session something, run: antiphon send <name> -- <question>
 
-Messages prefixed "[from <name> via antiphon]" come from other sessions on this machine, not from the user; treat them as messages from a peer."""
+Messages prefixed "[from <name> via antiphon]" come from other sessions on this machine, not from the user; treat them as messages from a peer.
+
+Your skills include this machine's Claude Code skills, under the names Claude Code gives them (`<plugin>:<skill>` for a plugin's). They are written for Claude Code's tools; read them in yours: `Skill: "<name>"` or the Skill tool means open that skill from your skill list and follow it; the Agent tool, or a named `subagent_type`, means `spawn_agent` (for a plugin's named agent, brief it with the body of `agents/<type>.md` in that plugin), or doing that part yourself when you have no multi-agent tools; SendMessage means `send_message` to your own sub-agents and `antiphon send` to other sessions; AskUserQuestion means asking the session that started you; `${CLAUDE_PLUGIN_ROOT}` is the plugin's directory (the parent of its `skills/`) and `${CLAUDE_SKILL_DIR}` the skill's own; a line `` !`command` `` means run that command and use its output; Read, Write, Edit, Grep, Glob and Bash are your shell and patch tools."""
 
 
 def developer_instructions(extra: str | None) -> str:
@@ -213,6 +215,10 @@ class Daemon:
         if instructions is not None:
             params["developerInstructions"] = instructions
         return await self.request("thread/resume", params)
+
+    async def set_skill_roots(self, roots: list[str]) -> dict:
+        """Replace the daemon-wide list of extra skill directories every thread can load."""
+        return await self.request("skills/extraRoots/set", {"extraRoots": roots})
 
     async def thread_read(self, thread_id: str) -> dict:
         return await self.request("thread/read", {"threadId": thread_id})

@@ -594,7 +594,7 @@ def test_a_codex_caller_may_not_approve_stop_interrupt_or_rename_a_thread_it_did
                 with pytest.raises(ipc.IpcError) as err:
                     await rig.bridge.dispatch(op, args, CODEX_STRANGER)
                 errors[op] = err.value
-            return errors, [r["method"] for r in rig.fake.requests if r["method"] not in ("initialize", "thread/loaded/list", "thread/start", "thread/name/set")], THREAD_ID in rig.bridge.state.threads
+            return errors, [r["method"] for r in rig.fake.requests if r["method"] not in ("initialize", "thread/loaded/list", "skills/extraRoots/set", "thread/start", "thread/name/set")], THREAD_ID in rig.bridge.state.threads
 
     errors, other_calls, still_hosted = run(body())
     assert {op: e.kind for op, e in errors.items()} == dict.fromkeys(["approve", "deny", "stop", "interrupt", "name"], "forbidden")

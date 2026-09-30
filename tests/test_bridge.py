@@ -25,6 +25,7 @@ TURNS_LIST = load_fixture("turns-list.jsonl")
 RESTART = load_fixture("daemon-restart.jsonl")
 HOOK_ORDER = load_fixture("permission-hook-order.jsonl")
 DELETE = load_fixture("thread-delete.jsonl")
+SKILLS = load_fixture("skills-extra-roots.jsonl")
 
 THREAD_ID = THREAD_START.result(2)["thread"]["id"]
 TURN_STARTED = APPROVAL.result(3)
@@ -81,6 +82,7 @@ def default_replies():
         "thread/resume": {"result": RESTART.result(6)},
         "thread/unsubscribe": {"result": {}},
         "thread/read": {"result": ADOPTION.result(2)},
+        "skills/extraRoots/set": {"result": SKILLS.result(3)},
     }
 
 
@@ -125,7 +127,8 @@ class Rig:
         return await self.bridge.dispatch("start", args, caller)
 
     def methods(self) -> list[str]:
-        return [r["method"] for r in self.fake.requests if r["method"] != "initialize"]
+        """The thread calls made, without the handshake and the skill roots every connection and start sends."""
+        return [r["method"] for r in self.fake.requests if r["method"] not in ("initialize", "skills/extraRoots/set")]
 
 
 # --- start ----------------------------------------------------------------------
@@ -161,6 +164,67 @@ def test_start_with_instructions_sends_them_after_antiphons_own_and_keeps_them(s
     expected = HEADLESS_INSTRUCTIONS + "\n\nAnswer in French."
     assert start_params["developerInstructions"] == expected
     assert state["threads"][THREAD_ID]["instructions"] == expected
+
+
+def claude_skill(rig: "Rig", name: str) -> Path:
+    directory = rig.sessions_dir.parent / "skills" / name
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: test skill\n---\n")
+    return directory
+
+
+def test_connecting_hands_the_daemon_the_claude_skill_roots(short_tmp):
+    async def body():
+        rig = Rig(short_tmp)
+        tidy = claude_skill(rig, "tidy")
+        async with rig:
+            sent = await rig.fake.wait_request("skills/extraRoots/set")
+            return tidy, sent["params"]
+
+    tidy, params = run(body())
+    assert params == {"extraRoots": [str(tidy)]}
+
+
+def test_start_refreshes_the_skill_roots_before_the_thread_starts(short_tmp):
+    async def body():
+        async with Rig(short_tmp) as rig:
+            await rig.fake.wait_request("skills/extraRoots/set")
+            added = claude_skill(rig, "added-later")
+            await rig.start_thread()
+            methods = [m["method"] for m in rig.fake.requests if m["method"] in ("skills/extraRoots/set", "thread/start")]
+            return added, methods, rig.fake.received("skills/extraRoots/set")[-1]["params"]
+
+    added, methods, params = run(body())
+    assert methods == ["skills/extraRoots/set", "skills/extraRoots/set", "thread/start"]
+    assert params == {"extraRoots": [str(added)]}
+
+
+def test_a_daemon_without_skill_roots_still_starts_threads_and_the_caller_is_told(short_tmp):
+    async def body():
+        rig = Rig(short_tmp)
+        del rig.fake.replies["skills/extraRoots/set"]
+        async with rig:
+            return await rig.start_thread()
+
+    result = run(body())
+    assert result["thread_id"] == THREAD_ID
+    assert "skills/extraRoots/set" in result["skills_warning"]
+
+
+def test_an_unreadable_claude_config_keeps_the_skill_roots_already_set(short_tmp):
+    async def body():
+        rig = Rig(short_tmp)
+        claude_skill(rig, "tidy")
+        async with rig:
+            await rig.fake.wait_request("skills/extraRoots/set")
+            (rig.sessions_dir.parent / "settings.json").write_text("{half written")
+            result = await rig.start_thread()
+            return result, len(rig.fake.received("skills/extraRoots/set"))
+
+    result, sets = run(body())
+    assert result["thread_id"] == THREAD_ID
+    assert sets == 1
+    assert "skills_warning" in result
 
 
 def test_start_dedupes_the_name_against_hosted_threads(short_tmp):
