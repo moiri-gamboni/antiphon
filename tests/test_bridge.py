@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from antiphon import ipc
-from antiphon.bridge import AlreadyRunning, Bridge
+from antiphon.bridge import IDLE_DETAIL_CHARS, AlreadyRunning, Bridge
 from antiphon.callers import Caller
 from antiphon.codex.daemon import HEADLESS_INSTRUCTIONS
 from fake_claude import FakeClaude, captured_frames, send_frame
@@ -23,6 +23,7 @@ ADOPTION = load_fixture("adoption.jsonl")
 SUB_AGENT = load_fixture("sub-agent.jsonl")
 TURNS_LIST = load_fixture("turns-list.jsonl")
 RESTART = load_fixture("daemon-restart.jsonl")
+RESTART_MID_TURN = load_fixture("restart-mid-turn.jsonl")
 HOOK_ORDER = load_fixture("permission-hook-order.jsonl")
 DELETE = load_fixture("thread-delete.jsonl")
 SKILLS = load_fixture("skills-extra-roots.jsonl")
@@ -819,6 +820,32 @@ def test_a_wait_in_flight_across_a_daemon_restart_gets_the_recovered_outcome(sho
             return await asyncio.wait_for(waiting, 5)
 
     assert run(body()) == {"status": "completed", "final": "BLOCKED", "thread_id": THREAD_ID}
+
+
+def test_a_turn_a_daemon_restart_ended_is_reported_with_its_cause(short_tmp):
+    result = run(_wait_across_a_drop(short_tmp, RESTART_MID_TURN.result(58)))
+    assert result["status"] == "interrupted"
+    assert result["final"].startswith("interrupted: the Codex daemon restarted while the turn was running")
+    assert len(result["final"]) <= IDLE_DETAIL_CHARS
+
+
+def test_a_turn_interrupted_while_the_bridge_was_away_is_not_blamed_on_a_restart(short_tmp):
+    listed = copy.deepcopy(RESTART_MID_TURN.result(58))
+    listed["data"][0]["completedAt"] = listed["data"][0]["startedAt"] + 5
+    assert run(_wait_across_a_drop(short_tmp, listed))["final"] == "interrupted"
+
+
+async def _wait_across_a_drop(short_tmp, listed: dict) -> dict:
+    """A wait on a running turn, across a dropped daemon connection after which the
+    daemon lists the turn as `listed`."""
+    async with Rig(short_tmp) as rig:
+        await rig.start_thread()
+        await rig.bridge.dispatch("send", {"target": "helper", "text": "go"}, HUMAN)
+        waiting = asyncio.create_task(rig.bridge.dispatch("wait", {"target": "helper", "timeout": 5}, HUMAN))
+        await asyncio.sleep(0.05)
+        rig.fake.replies["thread/turns/list"] = {"result": listed}
+        await rig.fake.drop()
+        return await asyncio.wait_for(waiting, 5)
 
 
 def test_a_recovered_turn_is_announced_once_even_if_its_completion_arrives_afterwards(short_tmp):

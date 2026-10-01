@@ -40,7 +40,7 @@ followed, in the Claude Code session, by `SendMessage(to: "reviewer", message: <
 
 ### How completion is signalled
 
-When a turn ends, the thread's full final answer is delivered to the session that started it, as an ordinary cross-session message from the thread's name (`start --no-report` turns this off); then every session that subscribed with `notify_when_idle` gets the idle notice, with the first 200 characters of the answer as its detail. A failed or interrupted turn reports `failed: <error>` or `interrupted: ...` the same way. `start --wait`, `send --wait` and `wait` also print the answer in the command's output, and survive one bridge restart mid-wait.
+When a turn ends, the thread's full final answer is delivered to the session that started it, as an ordinary cross-session message from the thread's name (`start --no-report` turns this off); then every session that subscribed with `notify_when_idle` gets the idle notice, with the first 200 characters of the answer as its detail. A failed turn reports `failed: <error>` the same way and an interrupted one `interrupted`; a turn the Codex daemon took down by restarting says so, and a message to the thread starts a new turn with its history intact. A message sent into a running turn joins it and never ends it. `start --wait`, `send --wait` and `wait` also print the answer in the command's output, and survive one bridge restart mid-wait.
 
 Each hosted thread is represented by a small child process of the bridge, because Claude Code lists a peer only while the pid in its record is alive. The children exit with the bridge, telling their subscribers `exited`, and come back when it restarts.
 

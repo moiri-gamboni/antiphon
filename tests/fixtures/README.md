@@ -130,7 +130,11 @@ capture_daemon.py --listen 20 thread/resume '{"threadId":"<thread>"}' @reconnect
 
 What it pins, for an idle subscribed thread: the client sees EOF (`connection closed by the daemon`) 0.2 s after the restart command starts, a second before it returns; the socket path accepts a new connection and drops it once (`BrokenPipeError` on `initialize`) before the new daemon answers; after the reconnect `thread/loaded/list` already lists the thread this client had resumed, `thread/resume` succeeds and `thread/read` reports `status: idle`. A second thread that had been loaded before the restart (created by a TUI that was already closed) was not in that list but broadcast `thread/status/changed{idle}` a second later, so the daemon reloads previously loaded threads after it starts answering.
 
-Not captured: the same with a turn in progress (whether the turn continues or dies).
+Not captured here: the same with a turn in progress. `restart-mid-turn.jsonl` holds that case, from the bridge's own log.
+
+### `restart-mid-turn.jsonl`
+
+Not a driven capture: two lines lifted from the bridge's `raw.jsonl` after the daemon's updater restarted the daemon while a thread was mid-turn, with the message text replaced and the ids numbered placeholders. The bridge's `thread/turns/list` request after it reconnected and resubscribed the thread, and the reply. What it pins: the turn that was running does not survive the restart, and the list reports it with `status: "interrupted"`, `error: null` and `completedAt: null`, where a turn ended by `turn/interrupt` has a `completedAt` (`turn-active.jsonl`). The log around these lines held no `turn/completed` for it (not kept here).
 
 ### `decline.jsonl`
 

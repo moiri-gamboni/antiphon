@@ -73,6 +73,9 @@ DELIVER_TIMEOUT = 10.0
 CHILD_EXIT_TIMEOUT = 3.0
 CHILD_LINE_LIMIT = 16 * 1024 * 1024  # a final answer relayed through the child can be long
 IDLE_DETAIL_CHARS = 200
+# Short enough, with its "interrupted: " prefix, for the idle notice to carry it whole.
+RESTART_INTERRUPTED = ("the Codex daemon restarted while the turn was running, which ends it; the thread keeps "
+                       "its history, and a new message starts a new turn on it")
 
 
 class AlreadyRunning(Exception):
@@ -207,7 +210,7 @@ def _outcome(turn: dict) -> tuple[str, str]:
         if not answers:
             answers = [i["text"] for i in turn.get("items", []) if i.get("type") == "agentMessage"]
         return status, "\n".join(answers)
-    # A daemon restart ends the turn it was running without a message of its own.
+    # An interrupted turn carries no error message (turn-active.jsonl, decline.jsonl).
     message = (turn.get("error") or {}).get("message") or ""
     return status, f"{status}: {message}" if message else status
 
@@ -731,6 +734,11 @@ class Bridge:
         if turn["status"] == "inProgress":
             thread.active_turn_id = turn["id"]
             return
+        if turn["status"] == "interrupted" and turn.get("completedAt") is None:
+            # A turn a daemon restart took down never completes (restart-mid-turn.jsonl), where
+            # an interrupted one has a completedAt (turn-active.jsonl). Said outright, since a
+            # bare "interrupted" reads as if a message steered into the turn had ended it.
+            turn = {**turn, "error": {"message": RESTART_INTERRUPTED}}
         self._recovered_turns.add(turn["id"])
         self._record_turn_end(thread, turn)
 
