@@ -26,6 +26,7 @@ from fake_claude import (
 
 CAPTURED_RECORD = captured_events("peer-frames.jsonl")[0]["data"]
 CAPTURED_INBOUND = [f for f in captured_frames("peer-frames.jsonl", "frame") if f.get("type") == "user"][0]
+CAPTURED_HOP_CHAIN = captured_frames("peer-frames-hop-chain.jsonl", "frame")[0]
 CAPTURED_NOTIFY = [f for f in captured_frames("peer-frames.jsonl", "frame") if f.get("action") == "notify_when_idle"][0]
 CAPTURED_PROBE = [f for f in captured_frames("peer-frames.jsonl", "frame") if f.get("action") == "sandbox_probe"][0]
 CAPTURED_SENT_USER = [f for f in captured_frames("peer-frames.jsonl", "sent") if f.get("type") == "user"][0]
@@ -191,6 +192,13 @@ def test_inbound_message_is_unwrapped_with_its_sender(child, claude):
         "from_name": "claude-main",
         "text": "Spike zero round two: receipt and idle-notice test, please ignore.",
     }
+
+
+def test_inbound_envelope_with_a_hop_chain_attribute_is_unwrapped(child, claude):
+    child.register()
+    claude.replay(CAPTURED_HOP_CHAIN, child.sock)
+    event = child.event()
+    assert (event["from_name"], event["text"]) == ("claude-main", "Please continue with the next item.")
 
 
 def test_delivered_message_gets_no_receipt(child, claude):

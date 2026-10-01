@@ -174,6 +174,10 @@ What it pins, the case the bridge is in on an adopted thread it does not answer:
 
 Claude Code's peer protocol as seen by a stub peer: the registry record it wrote, an inbound `user` frame (`<cross-session-message from=... from-name=... from-mode=...>` body), the `notify_when_idle` control frame, and the `peer_message_status` and `peer_idle_notice` frames the stub sent back, the idle notice being the shape a Claude session rendered. `peer-frames.jsonl` also holds the stub's own outbound `user` frame to the Claude session (`kind: sent`) and one `sandbox_probe` control frame that a probe script running inside a Codex sandbox sent to the stub's socket; neither comes from Claude Code.
 
+### `peer-frames-hop-chain.jsonl`
+
+One inbound `user` frame from Claude Code 2.1.285 as a hosted thread's peer child logged it, with the message text replaced and its id a placeholder: the envelope carries a `hop-chain="<hex>"` attribute between `from` and `from-name`, which the older `peer-frames.jsonl` frame lacks, so nothing may rely on the attributes' order.
+
 ### `claude-bg-session.jsonl`
 
 The registry record a background Claude Code session writes for itself, from a real `claude --bg -n probe-bg --model sonnet 'reply with the single word ok'` in an empty directory, watched by polling `$CLAUDE_CONFIG_DIR/sessions` while it started. One `{"t", "kind": "registered", "data"}` line, the same shape as the first line of `peer-frames.jsonl`.

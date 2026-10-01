@@ -54,8 +54,10 @@ FRAME_LIMIT = 16 * 1024 * 1024
 # and the command loop with it; bound the whole connect+write+drain.
 SEND_TIMEOUT = 5.0
 
+# Attributes are matched by name, not position: Claude Code has added one (hop-chain,
+# peer-frames-hop-chain.jsonl) between from and from-name.
 WRAPPER = re.compile(
-    r'\A<cross-session-message from="(?P<from>[^"]*)" from-name="(?P<name>[^"]*)"[^>]*>\n'
+    r'\A<cross-session-message [^>]*?\bfrom-name="(?P<name>[^"]*)"[^>]*>\n'
     r"(?P<text>.*)\n</cross-session-message>\Z",
     re.DOTALL,
 )
